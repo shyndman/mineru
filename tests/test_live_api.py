@@ -62,7 +62,6 @@ class MinerULiveApiSmokeTests(unittest.TestCase):
                 batch = client.create_file_upload_extract_tasks(
                     [pdf_path],
                     files=[{"name": pdf_path.name, "data_id": "mineru-python-smoke-test"}],
-                    model_version="pipeline",
                     enable_formula=False,
                     enable_table=False,
                 )

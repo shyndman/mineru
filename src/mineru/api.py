@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import asyncio
+import json
+import time
+import zipfile
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
@@ -11,7 +16,7 @@ import httpx
 DEFAULT_BASE_URL = "https://mineru.net"
 DEFAULT_API_KEY_ENV = "MINERU_API_KEY"
 
-ModelVersion = Literal["pipeline", "vlm", "MinerU-HTML"]
+MODEL_VERSION: Literal["vlm"] = "vlm"
 ExtraFormat = Literal["docx", "html", "latex"]
 TaskState = Literal["done", "pending", "running", "failed", "converting"]
 BatchTaskState = Literal[
@@ -24,6 +29,7 @@ BatchTaskState = Literal[
 ]
 Json: TypeAlias = None | bool | int | float | str | list["Json"] | dict[str, "Json"]
 FileSpec: TypeAlias = Mapping[str, Json]
+ExtractionSourceKind = Literal["url", "file"]
 
 
 class MinerUError(Exception):
@@ -45,6 +51,22 @@ class MinerUApiError(MinerUError):
         self.trace_id = trace_id
         suffix = f" (trace_id={trace_id})" if trace_id else ""
         super().__init__(f"MinerU API error {code}: {message}{suffix}")
+
+
+class MinerUTaskFailedError(MinerUError):
+    task_id: str | None
+    batch_id: str | None
+    message: str
+
+    def __init__(self, message: str, *, task_id: str | None = None, batch_id: str | None = None) -> None:
+        self.task_id = task_id
+        self.batch_id = batch_id
+        self.message = message
+        super().__init__(message)
+
+
+class MinerUResultError(MinerUError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -135,6 +157,182 @@ class UploadBatch:
         )
 
 
+@dataclass(frozen=True)
+class MinerUZipFile:
+    path: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class MinerUParsedResult:
+    markdown: str | None
+    content_list: Json
+    content_list_v2: Json
+    model: Json
+    middle: Json
+    files: tuple[MinerUZipFile, ...]
+
+    @classmethod
+    def from_zip_bytes(cls, data: bytes) -> MinerUParsedResult:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            files = tuple(
+                MinerUZipFile(path=name, data=archive.read(name))
+                for name in archive.namelist()
+                if not name.endswith("/")
+            )
+        return cls(
+            markdown=_read_text_file(files, "full.md"),
+            content_list=_read_json_named_or_suffix(files, "content_list.json", "_content_list.json"),
+            content_list_v2=_read_json_named_or_suffix(files, "content_list_v2.json", "_content_list_v2.json"),
+            model=_read_json_suffix(files, "_model.json"),
+            middle=_read_json_named_or_suffix(files, "layout.json", "_middle.json"),
+            files=files,
+        )
+
+
+@dataclass(frozen=True)
+class ExtractionStatus:
+    state: TaskState | BatchTaskState | str | None
+    task_id: str | None = None
+    batch_id: str | None = None
+    file_name: str | None = None
+    data_id: str | None = None
+    full_zip_url: str | None = None
+    err_msg: str | None = None
+    extract_progress: ExtractProgress | None = None
+
+    @classmethod
+    def from_task(cls, task: ExtractTask) -> ExtractionStatus:
+        return cls(
+            task_id=task.task_id,
+            state=task.state,
+            data_id=task.data_id,
+            full_zip_url=task.full_zip_url,
+            err_msg=task.err_msg,
+            extract_progress=task.extract_progress,
+        )
+
+    @classmethod
+    def from_batch_task(cls, batch_id: str, task: BatchExtractTask) -> ExtractionStatus:
+        return cls(
+            batch_id=batch_id,
+            state=task.state,
+            file_name=task.file_name,
+            data_id=task.data_id,
+            full_zip_url=task.full_zip_url,
+            err_msg=task.err_msg,
+            extract_progress=task.extract_progress,
+        )
+
+
+@dataclass(frozen=True)
+class ExtractionSource:
+    kind: ExtractionSourceKind
+    path: Path | None = None
+    url: str | None = None
+    file: FileSpec | None = None
+
+
+class ExtractionJob:
+    _client: MinerUClient
+    _task_id: str | None
+    _batch_id: str | None
+    _poll_interval_seconds: float
+    source: ExtractionSource
+    last_status: ExtractionStatus
+
+    def __init__(
+        self,
+        client: MinerUClient,
+        *,
+        source: ExtractionSource,
+        status: ExtractionStatus,
+        task_id: str | None = None,
+        batch_id: str | None = None,
+        poll_interval_seconds: float = 2.0,
+    ) -> None:
+        self._client = client
+        self._task_id = task_id
+        self._batch_id = batch_id
+        self._poll_interval_seconds = poll_interval_seconds
+        self.source = source
+        self.last_status = status
+
+    @classmethod
+    def from_task(
+        cls,
+        client: MinerUClient,
+        task_id: str,
+        *,
+        source: ExtractionSource,
+        status: ExtractionStatus,
+        poll_interval_seconds: float,
+    ) -> ExtractionJob:
+        return cls(
+            client,
+            source=source,
+            status=status,
+            task_id=task_id,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    @classmethod
+    def from_batch(
+        cls,
+        client: MinerUClient,
+        batch_id: str,
+        *,
+        source: ExtractionSource,
+        status: ExtractionStatus,
+        poll_interval_seconds: float,
+    ) -> ExtractionJob:
+        return cls(
+            client,
+            source=source,
+            status=status,
+            batch_id=batch_id,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    def __call__(self) -> ExtractionStatus:
+        return self.refresh()
+
+    def __await__(self) -> Generator[object, None, MinerUParsedResult]:
+        return self._await_result().__await__()
+
+    async def _await_result(self) -> MinerUParsedResult:
+        return await asyncio.to_thread(self.wait)
+
+    def status(self) -> ExtractionStatus:
+        return self.refresh()
+
+    def refresh(self) -> ExtractionStatus:
+        if self._task_id is not None:
+            self.last_status = ExtractionStatus.from_task(self._client.get_extract_task(self._task_id))
+            return self.last_status
+        if self._batch_id is None:
+            raise MinerUResultError("Extraction job has neither task_id nor batch_id")
+        result = self._client.get_batch_extract_result(self._batch_id)
+        if len(result.results) != 1:
+            raise MinerUResultError(f"Expected one extraction result, got {len(result.results)}")
+        self.last_status = ExtractionStatus.from_batch_task(result.batch_id, result.results[0])
+        return self.last_status
+
+    def wait(self) -> MinerUParsedResult:
+        while True:
+            status = self.status()
+            if status.state == "done":
+                if status.full_zip_url is None:
+                    raise MinerUResultError("Extraction completed without full_zip_url")
+                return self._client.download_result(status.full_zip_url)
+            if status.state == "failed":
+                raise MinerUTaskFailedError(
+                    status.err_msg or "MinerU extraction failed",
+                    task_id=status.task_id,
+                    batch_id=status.batch_id,
+                )
+            time.sleep(self._poll_interval_seconds)
+
 class MinerUClient:
     api_key: str
     _owns_client: bool
@@ -167,11 +365,74 @@ class MinerUClient:
     def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
         self.close()
 
+    def extract_url(
+        self,
+        url: str,
+        *,
+        is_ocr: bool | None = None,
+        enable_formula: bool | None = None,
+        enable_table: bool | None = None,
+        language: str | None = None,
+        data_id: str | None = None,
+        extra_formats: Iterable[ExtraFormat] | None = None,
+        page_ranges: str | None = None,
+        no_cache: bool | None = None,
+        cache_tolerance: int | None = None,
+        poll_interval_seconds: float = 2.0,
+    ) -> ExtractionJob:
+        task = self.create_extract_task(
+            url,
+            is_ocr=is_ocr,
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+            language=language,
+            data_id=data_id,
+            extra_formats=extra_formats,
+            page_ranges=page_ranges,
+            no_cache=no_cache,
+            cache_tolerance=cache_tolerance,
+        )
+        return ExtractionJob.from_task(
+            self,
+            task.task_id,
+            source=ExtractionSource(kind="url", url=url),
+            status=ExtractionStatus.from_task(task),
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    def extract_file(
+        self,
+        path: str | Path,
+        *,
+        file: FileSpec | None = None,
+        enable_formula: bool | None = None,
+        enable_table: bool | None = None,
+        language: str | None = None,
+        extra_formats: Iterable[ExtraFormat] | None = None,
+        poll_interval_seconds: float = 2.0,
+    ) -> ExtractionJob:
+        file_path = Path(path)
+        file_spec = file if file is not None else {"name": file_path.name}
+        batch = self.create_file_upload_extract_tasks(
+            [file_path],
+            files=[file_spec],
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+            language=language,
+            extra_formats=extra_formats,
+        )
+        return ExtractionJob.from_batch(
+            self,
+            batch.batch_id,
+            source=ExtractionSource(kind="file", path=file_path, file=file_spec),
+            status=ExtractionStatus(batch_id=batch.batch_id, state="waiting-file", file_name=str(file_spec.get("name", file_path.name))),
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
     def create_extract_task(
         self,
         url: str,
         *,
-        model_version: ModelVersion | None = None,
         is_ocr: bool | None = None,
         enable_formula: bool | None = None,
         enable_table: bool | None = None,
@@ -190,7 +451,7 @@ class MinerUClient:
             json_body=_compact(
                 {
                     "url": url,
-                    "model_version": model_version,
+                    "model_version": MODEL_VERSION,
                     "is_ocr": is_ocr,
                     "enable_formula": enable_formula,
                     "enable_table": enable_table,
@@ -215,7 +476,6 @@ class MinerUClient:
         self,
         files: Iterable[FileSpec],
         *,
-        model_version: ModelVersion | None = None,
         enable_formula: bool | None = None,
         enable_table: bool | None = None,
         language: str | None = None,
@@ -229,7 +489,7 @@ class MinerUClient:
             json_body=_compact(
                 {
                     "files": [dict(file) for file in files],
-                    "model_version": model_version,
+                    "model_version": MODEL_VERSION,
                     "enable_formula": enable_formula,
                     "enable_table": enable_table,
                     "language": language,
@@ -255,7 +515,6 @@ class MinerUClient:
         paths: Iterable[str | Path],
         *,
         files: Iterable[FileSpec] | None = None,
-        model_version: ModelVersion | None = None,
         enable_formula: bool | None = None,
         enable_table: bool | None = None,
         language: str | None = None,
@@ -267,7 +526,6 @@ class MinerUClient:
         file_specs: list[FileSpec] = list(files) if files is not None else [{"name": path.name} for path in path_tuple]
         batch = self.create_upload_batch(
             file_specs,
-            model_version=model_version,
             enable_formula=enable_formula,
             enable_table=enable_table,
             language=language,
@@ -282,7 +540,6 @@ class MinerUClient:
         self,
         files: Iterable[FileSpec],
         *,
-        model_version: ModelVersion | None = None,
         enable_formula: bool | None = None,
         enable_table: bool | None = None,
         language: str | None = None,
@@ -298,7 +555,7 @@ class MinerUClient:
             json_body=_compact(
                 {
                     "files": [dict(file) for file in files],
-                    "model_version": model_version,
+                    "model_version": MODEL_VERSION,
                     "enable_formula": enable_formula,
                     "enable_table": enable_table,
                     "language": language,
@@ -315,6 +572,11 @@ class MinerUClient:
     def get_batch_extract_result(self, batch_id: str) -> BatchExtractResult:
         data = self._request("GET", f"/api/v4/extract-results/batch/{batch_id}")
         return BatchExtractResult.from_json(data)
+
+    def download_result(self, full_zip_url: str) -> MinerUParsedResult:
+        response = self._client.get(full_zip_url)
+        _ = response.raise_for_status()
+        return MinerUParsedResult.from_zip_bytes(response.content)
 
     def _request(
         self,
@@ -348,6 +610,31 @@ TransportHandler: TypeAlias = Callable[[httpx.Request], httpx.Response]
 
 def _compact(data: Mapping[str, Json | None]) -> dict[str, Json]:
     return {key: value for key, value in data.items() if value is not None}
+
+
+def _read_text_file(files: Sequence[MinerUZipFile], path: str) -> str | None:
+    for file in files:
+        if file.path == path or file.path.endswith(f"/{path}"):
+            return file.data.decode("utf-8")
+    return None
+
+
+def _read_json_suffix(files: Sequence[MinerUZipFile], suffix: str) -> Json:
+    matches = [file for file in files if file.path.endswith(suffix)]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise MinerUResultError(f"Expected one {suffix} file, found {len(matches)}")
+    return cast(Json, json.loads(matches[0].data.decode("utf-8")))
+
+
+def _read_json_named_or_suffix(files: Sequence[MinerUZipFile], name: str, suffix: str) -> Json:
+    matches = [file for file in files if file.path == name or file.path.endswith(f"/{name}")]
+    if matches:
+        if len(matches) > 1:
+            raise MinerUResultError(f"Expected one {name} file, found {len(matches)}")
+        return cast(Json, json.loads(matches[0].data.decode("utf-8")))
+    return _read_json_suffix(files, suffix)
 
 
 def _required_str(data: Mapping[str, object], key: str) -> str:
