@@ -8,7 +8,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-yaml
+        stages:
+          - pre-commit
       - id: end-of-file-fixer
+        stages:
+          - pre-commit
 
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.4.0
@@ -21,6 +25,8 @@ repos:
     rev: v0.15.0
     hooks:
       - id: ruff-check
+        stages:
+          - pre-commit
         args:
           - --fix
         types_or:
@@ -28,6 +34,8 @@ repos:
           - pyi
 
       - id: ruff-format
+        stages:
+          - pre-commit
         types_or:
           - python
           - pyi
@@ -36,3 +44,5 @@ repos:
     rev: 1.39.3
     hooks:
       - id: basedpyright
+        stages:
+          - pre-commit
