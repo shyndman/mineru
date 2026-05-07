@@ -14,7 +14,9 @@ class MinerUApiError(MinerUError):
     message: str
     trace_id: str | None
 
-    def __init__(self, code: int | str, message: str, trace_id: str | None = None) -> None:
+    def __init__(
+        self, code: int | str, message: str, trace_id: str | None = None
+    ) -> None:
         self.code = code
         self.message = message
         self.trace_id = trace_id
@@ -27,7 +29,9 @@ class MinerUTaskFailedError(MinerUError):
     batch_id: str | None
     message: str
 
-    def __init__(self, message: str, *, task_id: str | None = None, batch_id: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, task_id: str | None = None, batch_id: str | None = None
+    ) -> None:
         self.task_id = task_id
         self.batch_id = batch_id
         self.message = message

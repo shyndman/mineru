@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, TypeAlias
+from typing import Literal
 
 DEFAULT_BASE_URL = "https://mineru.net"
 DEFAULT_API_KEY_ENV = "MINERU_API_KEY"
@@ -17,6 +17,6 @@ BatchTaskState = Literal[
     "failed",
     "converting",
 ]
-Json: TypeAlias = object
-FileSpec: TypeAlias = Mapping[str, object]
+type Json = object
+type FileSpec = Mapping[str, object]
 ExtractionSourceKind = Literal["url", "file"]

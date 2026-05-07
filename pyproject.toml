@@ -28,3 +28,19 @@ exclude = [".venv"]
 pythonVersion = "3.13"
 typeCheckingMode = "recommended"
 reportMissingTypeStubs = false
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]

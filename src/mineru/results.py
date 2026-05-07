@@ -48,7 +48,9 @@ class MinerUParsedResult(BaseModel):
 
     @cached_property
     def layout(self) -> Json:
-        path = _find_file(self.files, "layout.json") or _find_file_by_suffix(self.files, "_middle.json")
+        path = _find_file(self.files, "layout.json") or _find_file_by_suffix(
+            self.files, "_middle.json"
+        )
         if path is None:
             return None
         return _read_json_file(path)
@@ -61,14 +63,20 @@ class MinerUParsedResult(BaseModel):
         extracted_dir.mkdir(parents=True, exist_ok=True)
         _extract_zip(zip_path, extracted_dir)
         files = tuple(
-            MinerUResultFile(path=path.relative_to(extracted_dir).as_posix(), local_path=path)
+            MinerUResultFile(
+                path=path.relative_to(extracted_dir).as_posix(), local_path=path
+            )
             for path in sorted(extracted_dir.rglob("*"))
             if path.is_file()
         )
         # MinerU also emits legacy content_list.json; this client ignores it.
-        content_list_path = _find_file(files, "content_list_v2.json") or _find_file_by_suffix(files, "_content_list_v2.json")
+        content_list_path = _find_file(
+            files, "content_list_v2.json"
+        ) or _find_file_by_suffix(files, "_content_list_v2.json")
         if content_list_path is None:
-            raise MinerUResultError("Expected content_list_v2.json in MinerU result zip")
+            raise MinerUResultError(
+                "Expected content_list_v2.json in MinerU result zip"
+            )
         return cls(
             output_dir=output_dir,
             zip_path=zip_path,
@@ -91,7 +99,9 @@ def _extract_zip(zip_path: Path, output_dir: Path) -> None:
                 continue
             target = (output_dir / member.filename).resolve()
             if not target.is_relative_to(root):
-                raise MinerUResultError(f"Unsafe path in MinerU result zip: {member.filename}")
+                raise MinerUResultError(
+                    f"Unsafe path in MinerU result zip: {member.filename}"
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(member) as source, target.open("wb") as destination:
                 shutil.copyfileobj(source, destination)
@@ -104,7 +114,9 @@ def _find_file(files: tuple[MinerUResultFile, ...], name: str) -> Path | None:
     return None
 
 
-def _find_file_by_suffix(files: tuple[MinerUResultFile, ...], suffix: str) -> Path | None:
+def _find_file_by_suffix(
+    files: tuple[MinerUResultFile, ...], suffix: str
+) -> Path | None:
     matches = [file.local_path for file in files if file.path.endswith(suffix)]
     if not matches:
         return None

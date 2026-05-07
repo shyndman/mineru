@@ -1,18 +1,31 @@
 from __future__ import annotations
 
-import os
 import hashlib
+import os
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import cast
 
 import httpx
 
 from .errors import MinerUApiError, MinerUConfigError
 from .job import ExtractionJob
-from .models import BatchExtractResult, ExtractionSource, ExtractionStatus, ExtractTask, UploadBatch
+from .models import (
+    BatchExtractResult,
+    ExtractionSource,
+    ExtractionStatus,
+    ExtractTask,
+    UploadBatch,
+)
 from .results import MinerUParsedResult, default_result_cache_dir
-from .types import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, MODEL_VERSION, ExtraFormat, FileSpec, Json
+from .types import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_BASE_URL,
+    MODEL_VERSION,
+    ExtraFormat,
+    FileSpec,
+    Json,
+)
 
 
 class MinerUClient:
@@ -146,7 +159,9 @@ class MinerUClient:
                     "data_id": data_id,
                     "callback": callback,
                     "seed": seed,
-                    "extra_formats": list(extra_formats) if extra_formats is not None else None,
+                    "extra_formats": list(extra_formats)
+                    if extra_formats is not None
+                    else None,
                     "page_ranges": page_ranges,
                     "no_cache": no_cache,
                     "cache_tolerance": cache_tolerance,
@@ -182,7 +197,9 @@ class MinerUClient:
                     "language": language,
                     "callback": callback,
                     "seed": seed,
-                    "extra_formats": list(extra_formats) if extra_formats is not None else None,
+                    "extra_formats": list(extra_formats)
+                    if extra_formats is not None
+                    else None,
                 }
             ),
         )
@@ -193,7 +210,9 @@ class MinerUClient:
             response = self._client.put(upload_url, content=file)
         _ = response.raise_for_status()
 
-    def upload_files(self, upload_urls: Iterable[str], paths: Iterable[str | Path]) -> None:
+    def upload_files(
+        self, upload_urls: Iterable[str], paths: Iterable[str | Path]
+    ) -> None:
         for upload_url, path in zip(upload_urls, paths, strict=True):
             self.upload_file(upload_url, path)
 
@@ -210,7 +229,11 @@ class MinerUClient:
         extra_formats: Iterable[ExtraFormat] | None = None,
     ) -> UploadBatch:
         path_tuple = tuple(Path(path) for path in paths)
-        file_specs = list(files) if files is not None else [{"name": path.name} for path in path_tuple]
+        file_specs = (
+            list(files)
+            if files is not None
+            else [{"name": path.name} for path in path_tuple]
+        )
         batch = self.create_upload_batch(
             file_specs,
             enable_formula=enable_formula,
@@ -248,7 +271,9 @@ class MinerUClient:
                     "language": language,
                     "callback": callback,
                     "seed": seed,
-                    "extra_formats": list(extra_formats) if extra_formats is not None else None,
+                    "extra_formats": list(extra_formats)
+                    if extra_formats is not None
+                    else None,
                     "no_cache": no_cache,
                     "cache_tolerance": cache_tolerance,
                 }
@@ -263,7 +288,9 @@ class MinerUClient:
         data = self._request("GET", f"/api/v4/extract-results/batch/{batch_id}")
         return BatchExtractResult.model_validate(data)
 
-    def download_result(self, full_zip_url: str, *, output_dir: Path | None = None) -> MinerUParsedResult:
+    def download_result(
+        self, full_zip_url: str, *, output_dir: Path | None = None
+    ) -> MinerUParsedResult:
         result_dir = output_dir or default_result_cache_dir(_result_id(full_zip_url))
         result_dir.mkdir(parents=True, exist_ok=True)
         zip_path = result_dir / "result.zip"
@@ -304,7 +331,7 @@ class MinerUClient:
         return cast(dict[str, object], data)
 
 
-TransportHandler: TypeAlias = Callable[[httpx.Request], httpx.Response]
+type TransportHandler = Callable[[httpx.Request], httpx.Response]
 
 
 def _compact(data: Mapping[str, Json | None]) -> dict[str, Json]:

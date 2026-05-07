@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import ClassVar, Literal, TypeAlias, cast
+from typing import ClassVar, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-JsonDict: TypeAlias = dict[str, object]
-BBox: TypeAlias = tuple[int, int, int, int]
+type JsonDict = dict[str, object]
+type BBox = tuple[int, int, int, int]
 
 
 class MinerUModel(BaseModel):
@@ -17,7 +17,7 @@ class TextRun(MinerUModel):
     content: str
 
 
-InlineContent: TypeAlias = TextRun
+type InlineContent = TextRun
 
 
 class ImageSource(MinerUModel):
@@ -117,7 +117,7 @@ class UnknownBlock(BaseBlock):
     content: object | None = None
 
 
-ContentBlock: TypeAlias = (
+type ContentBlock = (
     TitleBlock
     | ParagraphBlock
     | ListBlock
@@ -128,7 +128,7 @@ ContentBlock: TypeAlias = (
     | PageNumberBlock
     | UnknownBlock
 )
-KnownContentBlock: TypeAlias = (
+type KnownContentBlock = (
     TitleBlock
     | ParagraphBlock
     | ListBlock
@@ -156,7 +156,10 @@ class ContentList(MinerUModel):
         pages = cast(list[object], raw)
         return cls(
             pages=[
-                ContentPage(index=index, blocks=[_parse_block(block) for block in _page_blocks(page)])
+                ContentPage(
+                    index=index,
+                    blocks=[_parse_block(block) for block in _page_blocks(page)],
+                )
                 for index, page in enumerate(pages)
             ]
         )

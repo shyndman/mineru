@@ -15,19 +15,21 @@ from dotenv import load_dotenv
 
 from mineru import (
     ExtractionJob,
-    ParagraphBlock,
     MinerUApiError,
     MinerUClient,
     MinerUConfigError,
     MinerUParsedResult,
     MinerUTaskFailedError,
+    ParagraphBlock,
 )
 
 _ = load_dotenv(".testing.env", override=True)
 
 
 def mock_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
-    return httpx.Client(base_url="https://mineru.net", transport=httpx.MockTransport(handler))
+    return httpx.Client(
+        base_url="https://mineru.net", transport=httpx.MockTransport(handler)
+    )
 
 
 class MinerUClientTests(unittest.TestCase):
@@ -115,7 +117,10 @@ class MinerUClientTests(unittest.TestCase):
                     },
                 )
                 return self._json_response(
-                    {"batch_id": "batch-1", "file_urls": ["https://uploads.example/demo.pdf"]}
+                    {
+                        "batch_id": "batch-1",
+                        "file_urls": ["https://uploads.example/demo.pdf"],
+                    }
                 )
             self.assertEqual(request.method, "PUT")
             self.assertEqual(str(request.url), "https://uploads.example/demo.pdf")
@@ -142,7 +147,9 @@ class MinerUClientTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(request.content),
                 {
-                    "files": [{"url": "https://example.com/demo.pdf", "data_id": "doc-1"}],
+                    "files": [
+                        {"url": "https://example.com/demo.pdf", "data_id": "doc-1"}
+                    ],
                     "model_version": "vlm",
                     "no_cache": True,
                 },
@@ -184,7 +191,10 @@ class MinerUClientTests(unittest.TestCase):
 
     def test_api_error_raises_with_code_and_trace_id(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"code": "A0202", "msg": "Invalid Token", "trace_id": "trace-1"})
+            return httpx.Response(
+                200,
+                json={"code": "A0202", "msg": "Invalid Token", "trace_id": "trace-1"},
+            )
 
         client = MinerUClient(api_key="token", client=mock_client(handler))
 
@@ -204,7 +214,9 @@ class MinerUClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "result"
             client = MinerUClient(api_key="token", client=mock_client(handler))
-            result = client.download_result("https://cdn.example/result.zip", output_dir=output_dir)
+            result = client.download_result(
+                "https://cdn.example/result.zip", output_dir=output_dir
+            )
 
             self.assertEqual(result.output_dir, output_dir)
             self.assertEqual(result.zip_path, output_dir / "result.zip")
@@ -214,7 +226,9 @@ class MinerUClientTests(unittest.TestCase):
             self.assertIsInstance(block, ParagraphBlock)
             assert isinstance(block, ParagraphBlock)
             self.assertEqual(block.content.paragraph_content[0].content, "Smoke")
-            self.assertEqual(result.raw_output, [[{"type": "text", "content": "Smoke"}]])
+            self.assertEqual(
+                result.raw_output, [[{"type": "text", "content": "Smoke"}]]
+            )
             self.assertEqual(result.layout, {"_backend": "vlm", "pdf_info": []})
             full_md = next(file for file in result.files if file.path == "full.md")
             self.assertTrue(full_md.local_path.exists())
@@ -239,7 +253,9 @@ class MinerUClientTests(unittest.TestCase):
             return httpx.Response(200, content=zip_bytes)
 
         client = MinerUClient(api_key="token", client=mock_client(handler))
-        job = client.extract_url("https://example.com/demo.pdf", poll_interval_seconds=0)
+        job = client.extract_url(
+            "https://example.com/demo.pdf", poll_interval_seconds=0
+        )
 
         self.assertEqual(job.source.kind, "url")
         self.assertEqual(job.source.url, "https://example.com/demo.pdf")
@@ -262,7 +278,10 @@ class MinerUClientTests(unittest.TestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             if request.method == "POST":
                 return self._json_response(
-                    {"batch_id": "batch-1", "file_urls": ["https://uploads.example/demo.pdf"]}
+                    {
+                        "batch_id": "batch-1",
+                        "file_urls": ["https://uploads.example/demo.pdf"],
+                    }
                 )
             if request.method == "PUT":
                 return httpx.Response(200)
@@ -306,7 +325,9 @@ class MinerUClientTests(unittest.TestCase):
             )
 
         client = MinerUClient(api_key="token", client=mock_client(handler))
-        job = client.extract_url("https://example.com/demo.pdf", poll_interval_seconds=0)
+        job = client.extract_url(
+            "https://example.com/demo.pdf", poll_interval_seconds=0
+        )
 
         with self.assertRaises(MinerUTaskFailedError) as raised:
             _ = job.wait()
@@ -335,8 +356,12 @@ class MinerUClientTests(unittest.TestCase):
                     ]
                 ),
             )
-            archive.writestr("demo_model.json", json.dumps([[{"type": "text", "content": "Smoke"}]]))
-            archive.writestr("layout.json", json.dumps({"_backend": "vlm", "pdf_info": []}))
+            archive.writestr(
+                "demo_model.json", json.dumps([[{"type": "text", "content": "Smoke"}]])
+            )
+            archive.writestr(
+                "layout.json", json.dumps({"_backend": "vlm", "pdf_info": []})
+            )
         return output.getvalue()
 
     @staticmethod
@@ -345,7 +370,9 @@ class MinerUClientTests(unittest.TestCase):
 
     @staticmethod
     def _json_response(data: Mapping[str, object]) -> httpx.Response:
-        return httpx.Response(200, json={"code": 0, "msg": "ok", "trace_id": "trace-1", "data": data})
+        return httpx.Response(
+            200, json={"code": 0, "msg": "ok", "trace_id": "trace-1", "data": data}
+        )
 
     @staticmethod
     def _ok_response(_request: httpx.Request) -> httpx.Response:
