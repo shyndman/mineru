@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from mineru import MinerUClient
 
-load_dotenv(".testing.env", override=True)
+_ = load_dotenv(".testing.env", override=True)
 
 LIVE_API_ENABLED = os.getenv("RUN_MINERU_LIVE_API") == "1"
 LIVE_API_KEY_PRESENT = bool(os.getenv("MINERU_API_KEY"))
@@ -56,7 +56,7 @@ class MinerULiveApiSmokeTests(unittest.TestCase):
     def test_upload_tiny_pdf_and_read_live_batch_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "mineru-smoke.pdf"
-            pdf_path.write_bytes(TINY_PDF)
+            _ = pdf_path.write_bytes(TINY_PDF)
 
             with MinerUClient(timeout=30.0) as client:
                 batch = client.create_file_upload_extract_tasks(
@@ -80,4 +80,4 @@ class MinerULiveApiSmokeTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()

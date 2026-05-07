@@ -4,18 +4,18 @@ import json
 import os
 import tempfile
 import unittest
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
 
 import httpx
 from dotenv import load_dotenv
 
 from mineru import MinerUApiError, MinerUClient, MinerUConfigError
 
-load_dotenv(".testing.env", override=True)
+_ = load_dotenv(".testing.env", override=True)
 
 
-def mock_client(handler: Any) -> httpx.Client:
+def mock_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
     return httpx.Client(base_url="https://mineru.net", transport=httpx.MockTransport(handler))
 
 
@@ -24,7 +24,7 @@ class MinerUClientTests(unittest.TestCase):
         old_value = os.environ.pop("MINERU_API_KEY", None)
         try:
             with self.assertRaises(MinerUConfigError):
-                MinerUClient()
+                _ = MinerUClient()
         finally:
             if old_value is not None:
                 os.environ["MINERU_API_KEY"] = old_value
@@ -85,8 +85,10 @@ class MinerUClientTests(unittest.TestCase):
         task = client.get_extract_task("task-1")
 
         self.assertEqual(task.state, "running")
-        self.assertIsNotNone(task.extract_progress)
-        self.assertEqual(task.extract_progress.extracted_pages, 1)
+        progress = task.extract_progress
+        self.assertIsNotNone(progress)
+        assert progress is not None
+        self.assertEqual(progress.extracted_pages, 1)
 
     def test_create_upload_batch_and_upload_files(self) -> None:
         requests: list[httpx.Request] = []
@@ -112,7 +114,7 @@ class MinerUClientTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "demo.pdf"
-            path.write_bytes(b"pdf bytes")
+            _ = path.write_bytes(b"pdf bytes")
             client = MinerUClient(api_key="token", client=mock_client(handler))
             batch = client.create_file_upload_extract_tasks(
                 [path],
@@ -173,25 +175,25 @@ class MinerUClientTests(unittest.TestCase):
         self.assertEqual(result.results[0].full_zip_url, "https://cdn.example/demo.zip")
 
     def test_api_error_raises_with_code_and_trace_id(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"code": "A0202", "msg": "Invalid Token", "trace_id": "trace-1"})
 
         client = MinerUClient(api_key="token", client=mock_client(handler))
 
         with self.assertRaises(MinerUApiError) as raised:
-            client.get_extract_task("task-1")
+            _ = client.get_extract_task("task-1")
 
         self.assertEqual(raised.exception.code, "A0202")
         self.assertEqual(raised.exception.trace_id, "trace-1")
 
     @staticmethod
-    def _json_response(data: dict[str, Any]) -> httpx.Response:
+    def _json_response(data: Mapping[str, object]) -> httpx.Response:
         return httpx.Response(200, json={"code": 0, "msg": "ok", "trace_id": "trace-1", "data": data})
 
     @staticmethod
-    def _ok_response(request: httpx.Request) -> httpx.Response:
+    def _ok_response(_request: httpx.Request) -> httpx.Response:
         return MinerUClientTests._json_response({"task_id": "task-1"})
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()
