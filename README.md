@@ -5,7 +5,7 @@ VLM-only wrapper around MinerU's v4 extraction API. It supports URL extraction, 
 ## Install
 
 ```sh
-uv add mineru
+uv add git+https://github.com/shyndman/mineru.git
 ```
 
 Set `MINERU_API_KEY`, or pass `api_key=` to `MinerUClient`.
