@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 from mineru import (
     ExtractionJob,
+    ParagraphBlock,
     MinerUApiError,
     MinerUClient,
     MinerUConfigError,
@@ -204,10 +205,13 @@ class MinerUClientTests(unittest.TestCase):
         result = client.download_result("https://cdn.example/result.zip")
 
         self.assertEqual(result.markdown, "# Smoke\n")
-        self.assertEqual(result.content_list, [{"type": "text", "text": "Smoke", "page_idx": 0}])
-        self.assertEqual(result.content_list_v2, [[{"type": "paragraph"}]])
-        self.assertEqual(result.model, [[{"type": "text", "content": "Smoke"}]])
-        self.assertEqual(result.middle, {"_backend": "vlm", "pdf_info": []})
+        self.assertEqual(len(result.content_list.pages), 1)
+        block = result.content_list.pages[0].blocks[0]
+        self.assertIsInstance(block, ParagraphBlock)
+        assert isinstance(block, ParagraphBlock)
+        self.assertEqual(block.content.paragraph_content[0].content, "Smoke")
+        self.assertEqual(result.raw_output, [[{"type": "text", "content": "Smoke"}]])
+        self.assertEqual(result.layout, {"_backend": "vlm", "pdf_info": []})
         self.assertEqual(result.files[0].path, "full.md")
 
     def test_extract_url_job_reports_status_and_waits_for_result(self) -> None:
@@ -309,8 +313,23 @@ class MinerUClientTests(unittest.TestCase):
         output = BytesIO()
         with zipfile.ZipFile(output, "w") as archive:
             archive.writestr("full.md", "# Smoke\n")
-            archive.writestr("demo_content_list.json", json.dumps([{"type": "text", "text": "Smoke", "page_idx": 0}]))
-            archive.writestr("content_list_v2.json", json.dumps([[{"type": "paragraph"}]]))
+            archive.writestr(
+                "content_list_v2.json",
+                json.dumps(
+                    [
+                        [
+                            {
+                                "type": "paragraph",
+                                "content": {
+                                    "paragraph_content": [
+                                        {"type": "text", "content": "Smoke"}
+                                    ]
+                                },
+                            }
+                        ]
+                    ]
+                ),
+            )
             archive.writestr("demo_model.json", json.dumps([[{"type": "text", "content": "Smoke"}]]))
             archive.writestr("layout.json", json.dumps({"_backend": "vlm", "pdf_info": []}))
         return output.getvalue()

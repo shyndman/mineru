@@ -1,30 +1,51 @@
-from .api import (
+from .api import MinerUClient
+from .content import (
+    ContentBlock,
+    ContentList,
+    ContentPage,
+    ImageBlock,
+    ListBlock,
+    PageFooterBlock,
+    PageHeaderBlock,
+    PageNumberBlock,
+    ParagraphBlock,
+    TableBlock,
+    TextRun,
+    TitleBlock,
+    UnknownBlock,
+)
+from .errors import (
+    MinerUApiError,
+    MinerUConfigError,
+    MinerUError,
+    MinerUResultError,
+    MinerUTaskFailedError,
+)
+from .job import ExtractionJob
+from .models import (
     BatchExtractResult,
     BatchExtractTask,
-    ExtractionJob,
     ExtractionSource,
     ExtractionStatus,
     ExtractProgress,
     ExtractTask,
-    MinerUApiError,
-    MinerUClient,
-    MinerUConfigError,
-    MinerUError,
-    MinerUParsedResult,
-    MinerUResultError,
-    MinerUTaskFailedError,
-    MinerUZipFile,
     UploadBatch,
 )
+from .results import MinerUParsedResult, MinerUZipFile
 
 __all__ = [
     "BatchExtractResult",
     "BatchExtractTask",
+    "ContentBlock",
+    "ContentList",
+    "ContentPage",
     "ExtractionJob",
     "ExtractionSource",
     "ExtractionStatus",
     "ExtractProgress",
     "ExtractTask",
+    "ImageBlock",
+    "ListBlock",
     "MinerUApiError",
     "MinerUClient",
     "MinerUConfigError",
@@ -33,5 +54,13 @@ __all__ = [
     "MinerUResultError",
     "MinerUTaskFailedError",
     "MinerUZipFile",
+    "PageFooterBlock",
+    "PageHeaderBlock",
+    "PageNumberBlock",
+    "ParagraphBlock",
+    "TableBlock",
+    "TextRun",
+    "TitleBlock",
+    "UnknownBlock",
     "UploadBatch",
 ]
