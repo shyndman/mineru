@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Generator
+from pathlib import Path
 from typing import Protocol
 
 from .errors import MinerUResultError, MinerUTaskFailedError
@@ -13,7 +14,7 @@ from .results import MinerUParsedResult
 class MinerUClientProtocol(Protocol):
     def get_extract_task(self, task_id: str) -> ExtractTask: ...
     def get_batch_extract_result(self, batch_id: str) -> BatchExtractResult: ...
-    def download_result(self, full_zip_url: str) -> MinerUParsedResult: ...
+    def download_result(self, full_zip_url: str, *, output_dir: Path | None = None) -> MinerUParsedResult: ...
 
 
 class ExtractionJob:
@@ -101,13 +102,13 @@ class ExtractionJob:
         self.last_status = ExtractionStatus.from_batch_task(result.batch_id, result.results[0])
         return self.last_status
 
-    def wait(self) -> MinerUParsedResult:
+    def wait(self, *, output_dir: Path | None = None) -> MinerUParsedResult:
         while True:
             status = self.status()
             if status.state == "done":
                 if status.full_zip_url is None:
                     raise MinerUResultError("Extraction completed without full_zip_url")
-                return self._client.download_result(status.full_zip_url)
+                return self._client.download_result(status.full_zip_url, output_dir=output_dir)
             if status.state == "failed":
                 raise MinerUTaskFailedError(
                     status.err_msg or "MinerU extraction failed",

@@ -31,7 +31,7 @@ from .models import (
     ExtractTask,
     UploadBatch,
 )
-from .results import MinerUParsedResult, MinerUZipFile
+from .results import MinerUParsedResult, MinerUResultFile
 
 __all__ = [
     "BatchExtractResult",
@@ -51,9 +51,9 @@ __all__ = [
     "MinerUConfigError",
     "MinerUError",
     "MinerUParsedResult",
+    "MinerUResultFile",
     "MinerUResultError",
     "MinerUTaskFailedError",
-    "MinerUZipFile",
     "PageFooterBlock",
     "PageHeaderBlock",
     "PageNumberBlock",

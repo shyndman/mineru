@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import zipfile
 from functools import cached_property
-from io import BytesIO
+from pathlib import Path
 from typing import ClassVar, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -12,66 +14,104 @@ from .content import ContentList
 from .errors import MinerUResultError
 from .types import Json
 
+CACHE_DIR_ENV = "XDG_CACHE_HOME"
 
-class MinerUZipFile(BaseModel):
+
+class MinerUResultFile(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     path: str
-    data: bytes
+    local_path: Path
 
 
 class MinerUParsedResult(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
-    markdown: str | None
+    output_dir: Path
+    zip_path: Path
     content_list: ContentList
-    files: tuple[MinerUZipFile, ...]
+    files: tuple[MinerUResultFile, ...]
+
+    @cached_property
+    def markdown(self) -> str | None:
+        path = _find_file(self.files, "full.md")
+        if path is None:
+            return None
+        return path.read_text(encoding="utf-8")
 
     @cached_property
     def raw_output(self) -> Json:
-        return _read_json_suffix(self.files, "_model.json")
+        path = _find_file_by_suffix(self.files, "_model.json")
+        if path is None:
+            return None
+        return _read_json_file(path)
 
     @cached_property
     def layout(self) -> Json:
-        return _read_json_named_or_suffix(self.files, "layout.json", "_middle.json")
+        path = _find_file(self.files, "layout.json") or _find_file_by_suffix(self.files, "_middle.json")
+        if path is None:
+            return None
+        return _read_json_file(path)
 
     @classmethod
-    def from_zip_bytes(cls, data: bytes) -> MinerUParsedResult:
-        with zipfile.ZipFile(BytesIO(data)) as archive:
-            files = tuple(
-                MinerUZipFile(path=name, data=archive.read(name))
-                for name in archive.namelist()
-                if not name.endswith("/")
-            )
+    def from_zip_file(cls, zip_path: Path, output_dir: Path) -> MinerUParsedResult:
+        extracted_dir = output_dir / "extracted"
+        if extracted_dir.exists():
+            shutil.rmtree(extracted_dir)
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+        _extract_zip(zip_path, extracted_dir)
+        files = tuple(
+            MinerUResultFile(path=path.relative_to(extracted_dir).as_posix(), local_path=path)
+            for path in sorted(extracted_dir.rglob("*"))
+            if path.is_file()
+        )
         # MinerU also emits legacy content_list.json; this client ignores it.
-        content_list = _read_json_named_or_suffix(files, "content_list_v2.json", "_content_list_v2.json")
+        content_list_path = _find_file(files, "content_list_v2.json") or _find_file_by_suffix(files, "_content_list_v2.json")
+        if content_list_path is None:
+            raise MinerUResultError("Expected content_list_v2.json in MinerU result zip")
         return cls(
-            markdown=_read_text_file(files, "full.md"),
-            content_list=ContentList.from_mineru(content_list),
+            output_dir=output_dir,
+            zip_path=zip_path,
+            content_list=ContentList.from_mineru(_read_json_file(content_list_path)),
             files=files,
         )
 
 
-def _read_text_file(files: tuple[MinerUZipFile, ...], path: str) -> str | None:
+def default_result_cache_dir(result_id: str) -> Path:
+    cache_home = os.getenv(CACHE_DIR_ENV)
+    root = Path(cache_home) if cache_home else Path.home() / ".cache"
+    return root / "mineru" / "results" / result_id
+
+
+def _extract_zip(zip_path: Path, output_dir: Path) -> None:
+    root = output_dir.resolve()
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            target = (output_dir / member.filename).resolve()
+            if not target.is_relative_to(root):
+                raise MinerUResultError(f"Unsafe path in MinerU result zip: {member.filename}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as source, target.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
+
+
+def _find_file(files: tuple[MinerUResultFile, ...], name: str) -> Path | None:
     for file in files:
-        if file.path == path or file.path.endswith(f"/{path}"):
-            return file.data.decode("utf-8")
+        if file.path == name or file.path.endswith(f"/{name}"):
+            return file.local_path
     return None
 
 
-def _read_json_suffix(files: tuple[MinerUZipFile, ...], suffix: str) -> Json:
-    matches = [file for file in files if file.path.endswith(suffix)]
+def _find_file_by_suffix(files: tuple[MinerUResultFile, ...], suffix: str) -> Path | None:
+    matches = [file.local_path for file in files if file.path.endswith(suffix)]
     if not matches:
         return None
     if len(matches) > 1:
         raise MinerUResultError(f"Expected one {suffix} file, found {len(matches)}")
-    return cast(Json, json.loads(matches[0].data.decode("utf-8")))
+    return matches[0]
 
 
-def _read_json_named_or_suffix(files: tuple[MinerUZipFile, ...], name: str, suffix: str) -> Json:
-    matches = [file for file in files if file.path == name or file.path.endswith(f"/{name}")]
-    if matches:
-        if len(matches) > 1:
-            raise MinerUResultError(f"Expected one {name} file, found {len(matches)}")
-        return cast(Json, json.loads(matches[0].data.decode("utf-8")))
-    return _read_json_suffix(files, suffix)
+def _read_json_file(path: Path) -> Json:
+    return cast(Json, json.loads(path.read_text(encoding="utf-8")))

@@ -30,6 +30,8 @@ async def main() -> None:
         print(status.state, status.extract_progress)
 
         result = await job
+        print(result.output_dir)
+        print(result.zip_path)
         print(result.markdown)
         for page in result.content_list.pages:
             for block in page.blocks:
@@ -46,7 +48,7 @@ For a URL:
 ```python
 with MinerUClient() as client:
     job = client.extract_url("https://example.com/document.pdf")
-    result = job.wait()
+    result = job.wait(output_dir=Path("./tmp/result"))
 ```
 
-`ExtractionJob.refresh()` updates `last_status`. `await job` and `job.wait()` poll until MinerU returns `done`, then download and parse the result zip.
+`ExtractionJob.refresh()` updates `last_status`. `await job` and `job.wait()` poll until MinerU returns `done`, then download the result zip to `~/.cache/mineru/results/...` unless `output_dir` is supplied. Extracted files stay on disk; Markdown, raw output, and layout are loaded lazily from those files.

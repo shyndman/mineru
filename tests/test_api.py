@@ -201,18 +201,23 @@ class MinerUClientTests(unittest.TestCase):
             self.assertEqual(str(request.url), "https://cdn.example/result.zip")
             return httpx.Response(200, content=zip_bytes)
 
-        client = MinerUClient(api_key="token", client=mock_client(handler))
-        result = client.download_result("https://cdn.example/result.zip")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "result"
+            client = MinerUClient(api_key="token", client=mock_client(handler))
+            result = client.download_result("https://cdn.example/result.zip", output_dir=output_dir)
 
-        self.assertEqual(result.markdown, "# Smoke\n")
-        self.assertEqual(len(result.content_list.pages), 1)
-        block = result.content_list.pages[0].blocks[0]
-        self.assertIsInstance(block, ParagraphBlock)
-        assert isinstance(block, ParagraphBlock)
-        self.assertEqual(block.content.paragraph_content[0].content, "Smoke")
-        self.assertEqual(result.raw_output, [[{"type": "text", "content": "Smoke"}]])
-        self.assertEqual(result.layout, {"_backend": "vlm", "pdf_info": []})
-        self.assertEqual(result.files[0].path, "full.md")
+            self.assertEqual(result.output_dir, output_dir)
+            self.assertEqual(result.zip_path, output_dir / "result.zip")
+            self.assertEqual(result.markdown, "# Smoke\n")
+            self.assertEqual(len(result.content_list.pages), 1)
+            block = result.content_list.pages[0].blocks[0]
+            self.assertIsInstance(block, ParagraphBlock)
+            assert isinstance(block, ParagraphBlock)
+            self.assertEqual(block.content.paragraph_content[0].content, "Smoke")
+            self.assertEqual(result.raw_output, [[{"type": "text", "content": "Smoke"}]])
+            self.assertEqual(result.layout, {"_backend": "vlm", "pdf_info": []})
+            full_md = next(file for file in result.files if file.path == "full.md")
+            self.assertTrue(full_md.local_path.exists())
 
     def test_extract_url_job_reports_status_and_waits_for_result(self) -> None:
         requests: list[str] = []

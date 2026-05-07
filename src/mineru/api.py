@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TypeAlias, cast
@@ -10,7 +11,7 @@ import httpx
 from .errors import MinerUApiError, MinerUConfigError
 from .job import ExtractionJob
 from .models import BatchExtractResult, ExtractionSource, ExtractionStatus, ExtractTask, UploadBatch
-from .results import MinerUParsedResult
+from .results import MinerUParsedResult, default_result_cache_dir
 from .types import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, MODEL_VERSION, ExtraFormat, FileSpec, Json
 
 
@@ -262,10 +263,16 @@ class MinerUClient:
         data = self._request("GET", f"/api/v4/extract-results/batch/{batch_id}")
         return BatchExtractResult.model_validate(data)
 
-    def download_result(self, full_zip_url: str) -> MinerUParsedResult:
-        response = self._client.get(full_zip_url)
-        _ = response.raise_for_status()
-        return MinerUParsedResult.from_zip_bytes(response.content)
+    def download_result(self, full_zip_url: str, *, output_dir: Path | None = None) -> MinerUParsedResult:
+        result_dir = output_dir or default_result_cache_dir(_result_id(full_zip_url))
+        result_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = result_dir / "result.zip"
+        with self._client.stream("GET", full_zip_url) as response:
+            _ = response.raise_for_status()
+            with zip_path.open("wb") as file:
+                for chunk in response.iter_bytes():
+                    _ = file.write(chunk)
+        return MinerUParsedResult.from_zip_file(zip_path, result_dir)
 
     def _request(
         self,
@@ -318,3 +325,7 @@ def _required_int_or_str(data: Mapping[str, object], key: str) -> int | str:
     if not isinstance(value, int | str):
         raise TypeError(f"Expected {key} to be int or str")
     return value
+
+
+def _result_id(full_zip_url: str) -> str:
+    return hashlib.sha256(full_zip_url.encode("utf-8")).hexdigest()[:24]
