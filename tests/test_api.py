@@ -7,11 +7,13 @@ import tempfile
 import unittest
 import zipfile
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
 from mineru import (
     ExtractionJob,
@@ -101,6 +103,93 @@ class MinerUClientTests(unittest.TestCase):
         self.assertIsNotNone(progress)
         assert progress is not None
         self.assertEqual(progress.extracted_pages, 1)
+
+    def test_list_tasks_maps_results(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "GET")
+            self.assertEqual(request.url.path, "/api/v4/tasks")
+            self.assertEqual(
+                dict(request.url.params), {"page_no": "2", "page_size": "5"}
+            )
+            return self._json_response(
+                {
+                    "list": [
+                        {
+                            "file_name": "demo.pdf",
+                            "task_id": "task-1",
+                            "type": "pdf",
+                            "state": "done",
+                            "full_md_link": "https://cdn.example/full.md",
+                            "err_msg": "",
+                            "created_at": 1778173950469,
+                            "model_version": "vlm2.7.6",
+                            "file_size": 2046627,
+                            "is_chem": False,
+                            "can_retry": False,
+                            "rank": 0,
+                            "is_expire": False,
+                            "cover_path": "https://cdn.example/cover.webp",
+                            "file_url": "",
+                        },
+                        {
+                            "file_name": "broken.pdf",
+                            "task_id": "task-2",
+                            "type": "",
+                            "state": "failed",
+                            "full_md_link": "",
+                            "err_msg": "parsing failed, please try again later",
+                            "err_code": -60010,
+                            "created_at": 1779025960944,
+                            "model_version": "vlm3.1.8",
+                            "file_size": 1048576,
+                            "is_chem": True,
+                            "can_retry": True,
+                            "rank": 0,
+                            "is_expire": False,
+                            "cover_path": "",
+                            "file_url": "https://example.com/broken.pdf",
+                        },
+                    ],
+                    "total": 2,
+                }
+            )
+
+        client = MinerUClient(api_key="token", client=mock_client(handler))
+        page = client.list_tasks(page_no=2, page_size=5)
+
+        self.assertEqual(page.total, 2)
+        self.assertEqual(len(page.tasks), 2)
+        self.assertEqual(page.tasks[0].task_id, "task-1")
+        self.assertEqual(page.tasks[0].file_name, "demo.pdf")
+        self.assertEqual(
+            page.tasks[0].created_at, datetime.fromtimestamp(1778173950469 / 1000, UTC)
+        )
+        self.assertEqual(str(page.tasks[0].full_md_link), "https://cdn.example/full.md")
+        self.assertIsNone(page.tasks[0].file_url)
+        self.assertFalse(page.tasks[0].has_chemical_formula)
+        self.assertIsNone(page.tasks[0].error)
+        self.assertNotIn("rank", page.tasks[0].model_dump())
+
+        self.assertEqual(page.tasks[1].task_id, "task-2")
+        self.assertIsNone(page.tasks[1].file_type)
+        self.assertEqual(page.tasks[1].state, "failed")
+        self.assertTrue(page.tasks[1].has_chemical_formula)
+        self.assertEqual(str(page.tasks[1].file_url), "https://example.com/broken.pdf")
+        self.assertIsNotNone(page.tasks[1].error)
+        assert page.tasks[1].error is not None
+        self.assertEqual(page.tasks[1].error.code, -60010)
+        self.assertEqual(
+            page.tasks[1].error.message, "parsing failed, please try again later"
+        )
+
+    def test_list_tasks_rejects_non_positive_paging(self) -> None:
+        client = MinerUClient(api_key="token", client=mock_client(self._ok_response))
+
+        with self.assertRaises(ValidationError):
+            _ = client.list_tasks(page_no=0)
+
+        with self.assertRaises(ValidationError):
+            _ = client.list_tasks(page_size=0)
 
     def test_create_upload_batch_and_upload_files(self) -> None:
         requests: list[httpx.Request] = []

@@ -29,6 +29,9 @@ from .models import (
     ExtractionStatus,
     ExtractProgress,
     ExtractTask,
+    TaskError,
+    TaskListItem,
+    TaskPage,
     UploadBatch,
 )
 from .results import MinerUParsedResult, MinerUResultFile
@@ -59,6 +62,9 @@ __all__ = [
     "PageNumberBlock",
     "ParagraphBlock",
     "TableBlock",
+    "TaskError",
+    "TaskListItem",
+    "TaskPage",
     "TextRun",
     "TitleBlock",
     "UnknownBlock",

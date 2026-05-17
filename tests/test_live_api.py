@@ -61,6 +61,15 @@ def tiny_pdf() -> bytes:
     "set RUN_MINERU_LIVE_API=1 and MINERU_API_KEY to call the live MinerU API",
 )
 class MinerULiveApiSmokeTests(unittest.TestCase):
+    def test_list_tasks_reads_live_page(self) -> None:
+        with MinerUClient(timeout=30.0) as client:
+            page = client.list_tasks(page_no=1, page_size=20)
+
+        self.assertGreaterEqual(page.total, len(page.tasks))
+        self.assertLessEqual(len(page.tasks), 20)
+        if page.tasks:
+            self.assertNotIn("rank", page.tasks[0].model_dump())
+
     def test_upload_tiny_pdf_and_read_live_batch_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "mineru-smoke.pdf"

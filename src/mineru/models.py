@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    NonNegativeInt,
+    field_validator,
+    model_validator,
+)
 
-from .types import BatchTaskState, ExtractionSourceKind, FileSpec, TaskState
+from .types import (
+    BatchTaskState,
+    ExtractionSourceKind,
+    FileSpec,
+    TaskListState,
+    TaskState,
+)
 
 
 class MinerUModel(BaseModel):
@@ -25,6 +40,68 @@ class ExtractTask(MinerUModel):
     full_zip_url: str | None = None
     err_msg: str | None = None
     extract_progress: ExtractProgress | None = None
+
+
+class TaskError(MinerUModel):
+    code: int | None = None
+    message: str | None = None
+
+
+class TaskListItem(MinerUModel):
+    file_name: str
+    task_id: str
+    file_type: str | None = Field(validation_alias="type")
+    state: TaskListState
+    full_md_link: HttpUrl | None = None
+    error: TaskError | None = None
+    created_at: datetime
+    model_version: str
+    extract_progress: ExtractProgress | None = None
+    file_size: NonNegativeInt
+    has_chemical_formula: bool = Field(validation_alias="is_chem")
+    can_retry: bool
+    is_expired: bool = Field(validation_alias="is_expire")
+    cover_path: HttpUrl | None = None
+    file_url: HttpUrl | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_task_payload(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+
+        raw_payload = cast(dict[str, object], value)
+        payload = raw_payload.copy()
+        _ = payload.pop("rank", None)
+
+        message: object | None = payload.pop("err_msg", None)
+        if message == "":
+            message = None
+
+        code: object | None = payload.pop("err_code", None)
+        if message is not None or code is not None:
+            payload["error"] = {"code": code, "message": message}
+
+        return payload
+
+    @field_validator(
+        "file_type", "full_md_link", "cover_path", "file_url", mode="before"
+    )
+    @classmethod
+    def empty_string_to_none(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def parse_created_at(cls, value: object) -> object:
+        if isinstance(value, int):
+            return datetime.fromtimestamp(value / 1000, UTC)
+        return value
+
+
+class TaskPage(MinerUModel):
+    tasks: tuple[TaskListItem, ...] = Field(validation_alias="list")
+    total: NonNegativeInt
 
 
 class BatchExtractTask(MinerUModel):

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 import httpx
+from pydantic import PositiveInt, validate_call
 
 from .errors import MinerUApiError, MinerUConfigError
 from .job import ExtractionJob
@@ -15,6 +16,7 @@ from .models import (
     ExtractionSource,
     ExtractionStatus,
     ExtractTask,
+    TaskPage,
     UploadBatch,
 )
 from .results import MinerUParsedResult, default_result_cache_dir
@@ -173,6 +175,15 @@ class MinerUClient:
     def get_extract_task(self, task_id: str) -> ExtractTask:
         data = self._request("GET", f"/api/v4/extract/task/{task_id}")
         return ExtractTask.model_validate(data)
+
+    @validate_call
+    def list_tasks(
+        self, *, page_no: PositiveInt = 1, page_size: PositiveInt = 20
+    ) -> TaskPage:
+        data = self._request(
+            "GET", f"/api/v4/tasks?page_no={page_no}&page_size={page_size}"
+        )
+        return TaskPage.model_validate(data)
 
     def create_upload_batch(
         self,

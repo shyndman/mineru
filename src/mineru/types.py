@@ -9,6 +9,15 @@ DEFAULT_API_KEY_ENV = "MINERU_API_KEY"
 MODEL_VERSION: Literal["vlm"] = "vlm"
 ExtraFormat = Literal["docx", "html", "latex"]
 TaskState = Literal["done", "pending", "running", "failed", "converting"]
+TaskListState = Literal[
+    "waiting-file",
+    "uploading",
+    "pending",
+    "running",
+    "failed",
+    "converting",
+    "done",
+]
 BatchTaskState = Literal[
     "done",
     "waiting-file",
