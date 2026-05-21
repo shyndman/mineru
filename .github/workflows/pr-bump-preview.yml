@@ -35,7 +35,30 @@ jobs:
         with:
           set-git-config: false
 
+      - name: Detect bootstrap release
+        id: bootstrap
+        run: |
+          if [ -n "$(git tag --list 'v0.0.0')" ]; then
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Preview v0.0.0 bootstrap release
+        if: steps.bootstrap.outputs.value == 'true'
+        id: bootstrap-preview
+        run: |
+          {
+            echo "status=0"
+            echo "output<<__CZ_BUMP_PREVIEW__"
+            echo "Bootstrap release: v0.0.0"
+            echo
+            cz changelog --unreleased-version v0.0.0 --dry-run
+            echo "__CZ_BUMP_PREVIEW__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run cz bump --dry-run
+        if: steps.bootstrap.outputs.value != 'true'
         id: dry-run
         run: |
           set +e
@@ -51,8 +74,8 @@ jobs:
 
       - name: Build comment body
         env:
-          STATUS: ${{ steps.dry-run.outputs.status }}
-          OUTPUT: ${{ steps.dry-run.outputs.output }}
+          STATUS: ${{ steps.bootstrap.outputs.value == 'true' && steps.bootstrap-preview.outputs.status || steps.dry-run.outputs.status }}
+          OUTPUT: ${{ steps.bootstrap.outputs.value == 'true' && steps.bootstrap-preview.outputs.output || steps.dry-run.outputs.output }}
         run: |
           {
             echo "<!-- commitizen-bump-preview -->"
@@ -60,7 +83,11 @@ jobs:
             echo
             case "${STATUS}" in
               0)
-                echo "Merging this PR will produce the following bump:"
+                if [ "${{ steps.bootstrap.outputs.value }}" = "true" ]; then
+                  echo "Merging this PR will create the bootstrap release:"
+                else
+                  echo "Merging this PR will produce the following bump:"
+                fi
                 echo
                 echo '```'
                 printf '%s\n' "${OUTPUT}"
