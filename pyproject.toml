@@ -3,6 +3,7 @@ name = "uminer"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+license = { file = "LICENSE" }
 authors = [
     { name = "Scott Hyndman", email = "scotty.hyndman@gmail.com" }
 ]
