@@ -1,3 +1,11 @@
+## v0.0.2 (2026-05-21)
+
+### Fix
+
+- **release**: restore git write access after bump
+- **release**: lock bumped versions before pushing
+- **release**: lock bumped versions before pushing
+
 ## v0.0.1 (2026-05-21)
 
 ### Fix
