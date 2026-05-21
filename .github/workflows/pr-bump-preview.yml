@@ -48,14 +48,25 @@ jobs:
         if: steps.bootstrap.outputs.value == 'true'
         id: bootstrap-preview
         run: |
+          cat > .cz-bootstrap.toml <<'EOF'
+          [tool.commitizen]
+          name = "cz_conventional_commits"
+          version_provider = "pep621"
+          version_scheme = "pep440"
+          tag_format = "v$version"
+          update_changelog_on_bump = true
+          changelog_incremental = false
+          major_version_zero = true
+          EOF
           {
             echo "status=0"
             echo "output<<__CZ_BUMP_PREVIEW__"
             echo "Bootstrap release: v0.0.0"
             echo
-            cz changelog --unreleased-version v0.0.0 --dry-run
+            cz --config .cz-bootstrap.toml changelog --unreleased-version v0.0.0 --dry-run
             echo "__CZ_BUMP_PREVIEW__"
           } >> "$GITHUB_OUTPUT"
+          rm .cz-bootstrap.toml
 
       - name: Run cz bump --dry-run
         if: steps.bootstrap.outputs.value != 'true'
