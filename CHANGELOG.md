@@ -1,3 +1,9 @@
+## v0.0.1 (2026-05-21)
+
+### Fix
+
+- **release**: push bootstrap tag with the PAT
+
 ## v0.0.0 (2026-05-21)
 
 ### Feat
