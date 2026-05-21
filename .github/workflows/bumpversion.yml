@@ -88,7 +88,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add uv.lock
-          git commit --amend --no-edit
+          git commit -m "bump: lock uv for v${{ steps.cz.outputs.version }}"
           git tag -f v${{ steps.cz.outputs.version }}
           git push origin HEAD:${GITHUB_REF_NAME} refs/tags/v${{ steps.cz.outputs.version }} --force
 
