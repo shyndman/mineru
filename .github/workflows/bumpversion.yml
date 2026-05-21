@@ -59,8 +59,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add CHANGELOG.md
           git commit -m "bump: release 0.0.0"
-          git tag v0.0.0
-          git push origin HEAD:${GITHUB_REF_NAME} --follow-tags
+          git tag -a v0.0.0 -m "v0.0.0"
+          git push origin HEAD:${GITHUB_REF_NAME} refs/tags/v0.0.0
 
       - name: Release v0.0.0
         if: steps.bootstrap.outputs.value == 'true'
