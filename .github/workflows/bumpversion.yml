@@ -85,6 +85,7 @@ jobs:
         if: steps.bootstrap.outputs.value != 'true' && steps.cz.outputs.version != '' && steps.cz.outputs.version != steps.cz.outputs.previous_version
         run: |
           uv lock
+          sudo chown -R "$(id -u):$(id -g)" .git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add uv.lock
