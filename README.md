@@ -1,54 +1,32 @@
-uminer: MinerU Python API client.
+# uminer
 
-VLM-only wrapper around MinerU's v4 extraction API. It supports URL extraction, local file upload extraction, polling, awaiting final results, and parsing the returned zip into Markdown plus typed Pydantic objects.
+[![PyPI version](https://img.shields.io/pypi/v/uminer.svg)](https://pypi.org/project/uminer/)
+[![CI](https://github.com/shyndman/uminer/actions/workflows/ci.yml/badge.svg)](https://github.com/shyndman/uminer/actions/workflows/ci.yml)
+
+Thin Python wrapper for MinerU's v4 extraction API.
+Submit a local file or URL, poll the job, then load Markdown and typed content objects from the returned result bundle.
 
 ## Install
 
 ```sh
-uv add git+https://github.com/shyndman/mineru.git
+uv add uminer
 ```
 
-Set `MINERU_API_KEY`, or pass `api_key=` to `MinerUClient`.
+## CLI
 
-## Happy path
+```sh
+export MINERU_API_KEY=...
+uv run uminer extract ./document.pdf --output-dir ./out
+```
+
+## Python
 
 ```python
-import asyncio
 from pathlib import Path
 
 from uminer import MinerUClient
 
-
-async def main() -> None:
-    with MinerUClient() as client:
-        job = client.extract_file(Path("document.pdf"))
-
-        print(job.source.path)
-        print(job.last_status.state)
-
-        status = job.refresh()
-        print(status.state, status.extract_progress)
-
-        result = await job
-        print(result.output_dir)
-        print(result.zip_path)
-        print(result.markdown)
-        for page in result.content_list.pages:
-            for block in page.blocks:
-                print(page.index, block.type, block.bbox)
-        print(result.raw_output)
-        print(result.layout)
-
-
-asyncio.run(main())
-```
-
-For a URL:
-
-```python
 with MinerUClient() as client:
-    job = client.extract_url("https://example.com/document.pdf")
-    result = job.wait(output_dir=Path("./tmp/result"))
+    result = client.extract_file(Path("document.pdf")).wait()
+    print(result.markdown)
 ```
-
-`ExtractionJob.refresh()` updates `last_status`. `await job` and `job.wait()` poll until MinerU returns `done`, then download the result zip to `~/.cache/uminer/results/...` unless `output_dir` is supplied. Extracted files stay on disk; Markdown, raw output, and layout are loaded lazily from those files.

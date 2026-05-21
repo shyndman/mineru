@@ -1,18 +1,32 @@
 [project]
 name = "uminer"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.0.0"
+description = "Thin Python wrapper for MinerU's v4 extraction API"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
     { name = "Scott Hyndman", email = "scotty.hyndman@gmail.com" }
 ]
 requires-python = ">=3.13"
+keywords = ["mineru", "pdf", "ocr", "markdown"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
 dependencies = [
     "click>=8.4.0",
     "httpx>=0.28.1",
     "pydantic>=2.13.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/shyndman/uminer"
+Repository = "https://github.com/shyndman/uminer"
+Issues = "https://github.com/shyndman/uminer/issues"
+Changelog = "https://github.com/shyndman/uminer/blob/main/CHANGELOG.md"
 
 [project.scripts]
 uminer = "uminer.cli:main"
