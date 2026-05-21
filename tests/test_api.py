@@ -15,7 +15,7 @@ import httpx
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from mineru import (
+from uminer import (
     ExtractionJob,
     MinerUApiError,
     MinerUClient,

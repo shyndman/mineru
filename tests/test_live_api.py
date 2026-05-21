@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from mineru import MinerUClient
+from uminer import MinerUClient
 
 _ = load_dotenv(".testing.env", override=True)
 
@@ -72,14 +72,14 @@ class MinerULiveApiSmokeTests(unittest.TestCase):
 
     def test_upload_tiny_pdf_and_read_live_batch_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            pdf_path = Path(temp_dir) / "mineru-smoke.pdf"
+            pdf_path = Path(temp_dir) / "uminer-smoke.pdf"
             _ = pdf_path.write_bytes(tiny_pdf())
 
             with MinerUClient(timeout=30.0) as client:
                 batch = client.create_file_upload_extract_tasks(
                     [pdf_path],
                     files=[
-                        {"name": pdf_path.name, "data_id": "mineru-python-smoke-test"}
+                        {"name": pdf_path.name, "data_id": "uminer-python-smoke-test"}
                     ],
                     enable_formula=False,
                     enable_table=False,

@@ -88,7 +88,7 @@ class MinerUParsedResult(BaseModel):
 def default_result_cache_dir(result_id: str) -> Path:
     cache_home = os.getenv(CACHE_DIR_ENV)
     root = Path(cache_home) if cache_home else Path.home() / ".cache"
-    return root / "mineru" / "results" / result_id
+    return root / "uminer" / "results" / result_id
 
 
 def _extract_zip(zip_path: Path, output_dir: Path) -> None:
