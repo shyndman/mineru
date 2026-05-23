@@ -589,6 +589,7 @@ dependencies = [
     { name = "click" },
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "yaspin" },
 ]
 
 [package.dev-dependencies]
@@ -606,6 +607,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.4.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "yaspin", specifier = ">=3.4.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -678,4 +680,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/34/d10901fb7686ec642e22d75d260f07ba6e05d28d5c83cb1efdc8d5c03e07/wrapt-2.2.0-cp314-cp314t-win_amd64.whl", hash = "sha256:cccce5c70a209eb385c82d063f332ed97fc02d1cf7bffb95b2e6995b5a9b8388", size = 83830, upload-time = "2026-05-21T04:51:15.341Z" },
     { url = "https://files.pythonhosted.org/packages/f3/11/d41fd5f17432703783f996fddc475d40baf20fe76f2c6dc217c2dd219b4c/wrapt-2.2.0-cp314-cp314t-win_arm64.whl", hash = "sha256:9ad894d5dc5960ebd546a87a78160a8c645b99899e7e45a538436919bc9be5a6", size = 80711, upload-time = "2026-05-21T04:51:16.859Z" },
     { url = "https://files.pythonhosted.org/packages/33/19/713f33fcd8f7b0aa87c9d068b590dc1e86c51d5e329bf83dd91ee47fe872/wrapt-2.2.0-py3-none-any.whl", hash = "sha256:03b77d3ecab6c38e5da7a5709cee6899083d08fc1bcd648b4fa78b346fc66282", size = 60994, upload-time = "2026-05-21T04:51:37.606Z" },
+]
+
+[[package]]
+name = "yaspin"
+version = "3.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "termcolor" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8d/c5/826a862dcfcb9e85321f96d6f1b4b96b3b9bf37df6f63dce9cffd0b17053/yaspin-3.4.0.tar.gz", hash = "sha256:a83a81ac7a9d161e116fb668a7e4d10d87fb18d02b4b08a17b7e472f465f3c90", size = 42396, upload-time = "2025-12-06T12:33:51.889Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/93/6f/7403e6ae864a0a7f1cdd8814d39690062766e141339127f2b3469201ff6f/yaspin-3.4.0-py3-none-any.whl", hash = "sha256:2a40572a38d39846d0df0a421733459481b7da17789f7a2618c3181bb0a82819", size = 21822, upload-time = "2025-12-06T12:33:50.633Z" },
 ]

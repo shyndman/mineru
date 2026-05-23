@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,6 +9,9 @@ from typing import final
 from urllib.parse import urlparse
 
 import click
+from yaspin import yaspin as create_spinner
+from yaspin.core import Yaspin
+from yaspin.spinners import Spinners  # pyright: ignore[reportAny]
 
 from .api import MinerUClient
 from .errors import MinerUError, MinerUTaskFailedError
@@ -19,49 +23,59 @@ DEFAULT_ENV_FILE: Path = Path.home() / ".config" / "uminer" / "uminer.env"
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 type RgbColor = tuple[int, int, int]
+type CliColor = str | RgbColor
 
-HEADER_BACKGROUND: RgbColor = (43, 43, 43)
+_HOME_PREFIX: str = str(Path.home())
+
+HEADER_BACKGROUND: RgbColor = (30, 30, 30)
 HEADER_FOREGROUND: RgbColor = (255, 255, 255)
-STATE_PENDING: RgbColor = (186, 140, 44)
+STATE: RgbColor = (186, 140, 44)
 STATE_FAILED: RgbColor = (186, 68, 68)
-STATE_DONE: RgbColor = (86, 120, 224)
 STATE_COLORS: dict[str, RgbColor] = {
-    "waiting-file": STATE_PENDING,
-    "uploading": STATE_PENDING,
-    "pending": STATE_PENDING,
-    "running": STATE_PENDING,
-    "converting": STATE_PENDING,
+    "waiting-file": STATE,
+    "uploading": STATE,
+    "pending": STATE,
+    "running": STATE,
+    "converting": STATE,
     "failed": STATE_FAILED,
-    "done": STATE_DONE,
+    "done": STATE,
 }
+LABEL: RgbColor = (140, 140, 140)
+PUNCT: RgbColor = (120, 120, 120)
+REF: RgbColor = (108, 160, 172)
 
 
 @final
 class _StatusPrinter:
+    _spinner: Yaspin | None
+    _use_spinner: bool
+
     def __init__(self) -> None:
-        self._active: bool = False
-        self._last_width: int = 0
+        self._use_spinner = sys.stderr.isatty()
+        self._spinner = None
 
-    def line(
-        self, message: str, *, fg: RgbColor | None = None, dim: bool = False
-    ) -> None:
-        self.finish()
-        click.echo(click.style(message, fg=fg, dim=dim), err=True)
+    def update(self, message: str) -> None:
+        if self._use_spinner:
+            if self._spinner is None:
+                self._spinner = create_spinner(
+                    Spinners.dots,  # pyright: ignore[reportAny]
+                    stream=sys.stderr,
+                )
+                self._spinner.start()
+            self._spinner.text = message
+        else:
+            click.echo(message, err=True)
 
-    def update(self, message: str, *, fg: RgbColor | None = None) -> None:
-        padding = " " * max(0, self._last_width - len(message))
-        styled = click.style(message, fg=fg)
-        click.echo(f"\r{styled}{padding}", err=True, nl=False)
-        self._active = True
-        self._last_width = len(message)
+    def complete(self, message: str) -> None:
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+        click.echo(message, err=True)
 
-    def finish(self, message: str | None = None, *, fg: RgbColor | None = None) -> None:
-        if message is not None:
-            self.update(message, fg=fg)
-        if self._active:
-            click.echo(err=True)
-        self._active = False
-        self._last_width = 0
+    def finish(self) -> None:
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -125,13 +139,20 @@ def _state_color(state: str | None) -> RgbColor | None:
     return STATE_COLORS.get(state)
 
 
-def _job_reference(job: ExtractionJob) -> str:
+def _tilde(path: Path | str) -> str:
+    s = str(path)
+    if s.startswith(_HOME_PREFIX):
+        return "~" + s[len(_HOME_PREFIX) :]
+    return s
+
+
+def _styled_job_reference(job: ExtractionJob) -> str:
     status = job.last_status
     if status.task_id is not None:
-        return f"task {status.task_id}"
+        return click.style("task ", fg=LABEL) + click.style(status.task_id, fg=REF)
     if status.batch_id is not None:
-        return f"batch {status.batch_id}"
-    return "job"
+        return click.style("batch ", fg=LABEL) + click.style(status.batch_id, fg=REF)
+    return click.style("job", fg=LABEL)
 
 
 def _source_label(job: ExtractionJob) -> str:
@@ -141,7 +162,7 @@ def _source_label(job: ExtractionJob) -> str:
             raise RuntimeError("URL extraction job missing source URL")
         return source.url
     if source.path is not None:
-        return str(source.path)
+        return _tilde(source.path)
     return "file"
 
 
@@ -176,22 +197,24 @@ def _wait_for_result(
         message = _progress_message(status)
         if message == seen_message:
             return
-        printer.update(message, fg=_state_color(status.state))
+        printer.update(click.style(message, fg=_state_color(status.state)))
         seen_message = message
 
     def on_download_start() -> None:
         zip_url = job.last_status.full_zip_url
         if zip_url is None:
             raise RuntimeError("Extraction job missing result ZIP URL")
-        printer.line(f"zip URL: {zip_url}", fg=STATE_DONE)
-        printer.update("downloading result", fg=STATE_DONE)
+        printer.update(
+            click.style("zip URL", fg=LABEL) + click.style(": ", fg=PUNCT) + zip_url
+        )
+        printer.update(click.style("downloading", fg=_state_color("running")))
 
     result = job.wait(
         output_dir=output_dir,
         on_update=on_update,
         on_download_start=on_download_start,
     )
-    printer.finish(f"saved to {result.output_dir}", fg=STATE_DONE)
+    printer.complete(click.style("saved to ", fg=LABEL) + _tilde(result.output_dir))
     return result.output_dir
 
 
@@ -348,6 +371,22 @@ def extract_cmd(
     extra_formats: Iterable[str] | None = None
     _ = extra_formats  # reserved for a later flag
     printer = _StatusPrinter()
+    seen_upload_percentage: int | None = None
+
+    def on_upload_progress(path: Path, uploaded_bytes: int, total_bytes: int) -> None:
+        nonlocal seen_upload_percentage
+        percentage = 100 if total_bytes == 0 else uploaded_bytes * 100 // total_bytes
+        if percentage == seen_upload_percentage:
+            return
+        printer.update(
+            click.style("uploading ", fg=LABEL)
+            + _tilde(path)
+            + click.style(" · ", fg=PUNCT)
+            + str(percentage)
+            + click.style("%", fg=PUNCT)
+        )
+        seen_upload_percentage = percentage
+
     try:
         if _is_url(source):
             job: ExtractionJob = cli.client.extract_url(
@@ -371,14 +410,28 @@ def extract_cmd(
             file_path = Path(source).expanduser()
             if not file_path.exists():
                 raise click.UsageError(f"File not found: {file_path}")
+            printer.update(
+                click.style("uploading ", fg=LABEL)
+                + _tilde(file_path)
+                + click.style(" · ", fg=PUNCT)
+                + "0"
+                + click.style("%", fg=PUNCT)
+            )
+            seen_upload_percentage = 0
             job = cli.client.extract_file(
                 file_path,
                 enable_formula=enable_formula,
                 enable_table=enable_table,
                 language=language,
+                on_upload_progress=on_upload_progress,
                 poll_interval_seconds=poll_interval,
             )
-        printer.line(f"submitted {_job_reference(job)} · {_source_label(job)}")
+        printer.update(
+            click.style("submitted ", fg=LABEL)
+            + _styled_job_reference(job)
+            + click.style(" · ", fg=PUNCT)
+            + _source_label(job)
+        )
         result_dir = _wait_for_result(job, output_dir=output_dir, printer=printer)
     except MinerUTaskFailedError as exc:
         printer.finish()

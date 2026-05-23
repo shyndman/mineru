@@ -149,7 +149,15 @@ class FakeMinerUClient:
         return self.job
 
     def extract_file(self, source: Path, **_: object) -> FakeJob:
-        del source
+        on_upload_progress = cast(
+            Callable[[Path, int, int], None] | None, _.get("on_upload_progress")
+        )
+        if on_upload_progress is not None:
+            total_bytes = source.stat().st_size
+            halfway = total_bytes // 2
+            if 0 < halfway < total_bytes:
+                on_upload_progress(source, halfway, total_bytes)
+            on_upload_progress(source, total_bytes, total_bytes)
         if self.job is None:
             raise AssertionError("test did not configure FakeMinerUClient.job")
         return self.job
@@ -180,10 +188,10 @@ def test_list_output_uses_filename_header_and_colors(monkeypatch: MonkeyPatch) -
     assert "FILENAME" in result.stdout
     assert "FILE_NAME" not in result.stdout
     assert (
-        "\x1b[38;2;255;255;255m\x1b[48;2;43;43;43m\x1b[1mFILENAME    STATE"
+        "\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m\x1b[1mFILENAME    STATE"
         in result.stdout
     )
-    assert "\x1b[38;2;86;120;224m" in result.stdout
+    assert "\x1b[38;2;186;140;44m" in result.stdout
     assert "\x1b[38;2;186;68;68m" in result.stdout
     assert "\x1b[2mpage 1 · showing 2 of 2\x1b[0m" in result.stdout
 
@@ -225,14 +233,97 @@ def test_extract_reports_progress_and_keeps_stdout_clean(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{output_dir}\n"
+    assert "\r" not in result.stderr
     assert "submitted task task-1 · https://example.com/demo.pdf" in result.stderr
     assert "pending" in result.stderr
     assert "running 3/12 pages" in result.stderr
     assert result.stderr.count("running 3/12 pages") == 1
     assert "converting" in result.stderr
     assert "zip URL: https://cdn.example/result.zip" in result.stderr
-    assert "downloading result" in result.stderr
+    assert "downloading" in result.stderr
     assert f"saved to {output_dir}" in result.stderr
+
+
+def test_extract_uses_rgb_colors(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    output_dir = tmp_path / "result"
+    FakeMinerUClient.job = FakeJob(
+        source=ExtractionSource(kind="url", url="https://example.com/demo.pdf"),
+        last_status=ExtractionStatus(task_id="task-1", state=None),
+        statuses=[
+            ExtractionStatus(task_id="task-1", state="pending"),
+            ExtractionStatus(
+                task_id="task-1",
+                state="done",
+                full_zip_url="https://cdn.example/result.zip",
+            ),
+        ],
+        output_dir=output_dir,
+    )
+
+    result = _invoke_main(
+        ["--api-key", "token", "extract", "https://example.com/demo.pdf"],
+        color=True,
+    )
+
+    assert result.exit_code == 0, result.output
+    # STATE gold for transitions
+    assert "\x1b[38;2;186;140;44m" in result.stderr
+    # LABEL gray for labels
+    assert "\x1b[38;2;140;140;140m" in result.stderr
+    # PUNCT gray for punctuation
+    assert "\x1b[38;2;120;120;120m" in result.stderr
+    # REF teal for task IDs
+    assert "\x1b[38;2;108;160;172m" in result.stderr
+    assert "pending" in result.stderr
+    assert "zip URL" in result.stderr
+    assert "https://cdn.example/result.zip" in result.stderr
+    assert "saved to" in result.stderr
+    assert str(output_dir) in result.stderr
+    # No old named terminal colors
+    assert "\x1b[93m" not in result.stderr
+    assert "\x1b[96m" not in result.stderr
+    assert "\x1b[92m" not in result.stderr
+
+
+def test_extract_file_reports_upload_progress_before_submission(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    source_path = tmp_path / "demo.pdf"
+    _ = source_path.write_bytes(b"1234")
+    output_dir = tmp_path / "result"
+    FakeMinerUClient.job = FakeJob(
+        source=ExtractionSource(
+            kind="file", path=source_path, file={"name": source_path.name}
+        ),
+        last_status=ExtractionStatus(batch_id="batch-1", state="waiting-file"),
+        statuses=[
+            ExtractionStatus(batch_id="batch-1", state="pending"),
+            ExtractionStatus(
+                batch_id="batch-1",
+                state="done",
+                full_zip_url="https://cdn.example/result.zip",
+            ),
+        ],
+        output_dir=output_dir,
+    )
+
+    result = _invoke_main(["--api-key", "token", "extract", str(source_path)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{output_dir}\n"
+    upload_start = f"uploading {source_path} · 0%"
+    upload_half = f"uploading {source_path} · 50%"
+    upload_done = f"uploading {source_path} · 100%"
+    submitted = f"submitted batch batch-1 · {source_path}"
+    assert upload_start in result.stderr
+    assert upload_half in result.stderr
+    assert upload_done in result.stderr
+    assert submitted in result.stderr
+    assert result.stderr.index(upload_start) < result.stderr.index(upload_half)
+    assert result.stderr.index(upload_half) < result.stderr.index(upload_done)
+    assert result.stderr.index(upload_done) < result.stderr.index(submitted)
 
 
 def test_extract_failure_message_includes_task_id(monkeypatch: MonkeyPatch) -> None:
