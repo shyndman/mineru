@@ -188,10 +188,10 @@ def test_list_output_uses_filename_header_and_colors(monkeypatch: MonkeyPatch) -
     assert "FILENAME" in result.stdout
     assert "FILE_NAME" not in result.stdout
     assert (
-        "\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m\x1b[1mFILENAME    STATE"
+        "\x1b[38;2;255;255;255m\x1b[48;2;38;34;59m\x1b[1mFILENAME    STATE"
         in result.stdout
     )
-    assert "\x1b[38;2;186;140;44m" in result.stdout
+    assert "\x1b[38;2;86;120;224m" in result.stdout
     assert "\x1b[38;2;186;68;68m" in result.stdout
     assert "\x1b[2mpage 1 · showing 2 of 2\x1b[0m" in result.stdout
 
@@ -267,8 +267,8 @@ def test_extract_uses_rgb_colors(monkeypatch: MonkeyPatch, tmp_path: Path) -> No
     )
 
     assert result.exit_code == 0, result.output
-    # STATE gold for transitions
-    assert "\x1b[38;2;186;140;44m" in result.stderr
+    # STATE blue for transitions
+    assert "\x1b[38;2;95;130;220m" in result.stderr
     # LABEL gray for labels
     assert "\x1b[38;2;140;140;140m" in result.stderr
     # PUNCT gray for punctuation

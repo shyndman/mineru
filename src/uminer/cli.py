@@ -27,10 +27,11 @@ type CliColor = str | RgbColor
 
 _HOME_PREFIX: str = str(Path.home())
 
-HEADER_BACKGROUND: RgbColor = (30, 30, 30)
+HEADER_BACKGROUND: RgbColor = (38, 34, 59)
 HEADER_FOREGROUND: RgbColor = (255, 255, 255)
-STATE: RgbColor = (186, 140, 44)
+STATE: RgbColor = (95, 130, 220)
 STATE_FAILED: RgbColor = (186, 68, 68)
+LIST_STATE_DONE: RgbColor = (86, 120, 224)
 STATE_COLORS: dict[str, RgbColor] = {
     "waiting-file": STATE,
     "uploading": STATE,
@@ -38,7 +39,7 @@ STATE_COLORS: dict[str, RgbColor] = {
     "running": STATE,
     "converting": STATE,
     "failed": STATE_FAILED,
-    "done": STATE,
+    "done": LIST_STATE_DONE,
 }
 LABEL: RgbColor = (140, 140, 140)
 PUNCT: RgbColor = (120, 120, 120)
