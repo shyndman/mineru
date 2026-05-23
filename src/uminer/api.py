@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
-from typing import cast
+from typing import cast, final, override
 
 import httpx
 from pydantic import PositiveInt, validate_call
@@ -28,6 +28,41 @@ from .types import (
     FileSpec,
     Json,
 )
+
+type UploadProgressCallback = Callable[[Path, int, int], None]
+
+UPLOAD_CHUNK_SIZE = 64 * 1024
+
+
+@final
+class _ProgressByteStream(httpx.SyncByteStream):
+    _path: Path
+    _total_bytes: int
+    _callback: UploadProgressCallback
+    _uploaded_bytes: int
+
+    def __init__(
+        self, path: Path, total_bytes: int, callback: UploadProgressCallback
+    ) -> None:
+        self._path = path
+        self._total_bytes = total_bytes
+        self._callback = callback
+        self._uploaded_bytes = 0
+
+    @override
+    def __iter__(self) -> Iterator[bytes]:
+        with self._path.open("rb") as file:
+            while True:
+                chunk = file.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                self._uploaded_bytes += len(chunk)
+                self._callback(self._path, self._uploaded_bytes, self._total_bytes)
+                yield chunk
+
+    @override
+    def close(self) -> None:
+        return None
 
 
 class MinerUClient:
@@ -107,6 +142,7 @@ class MinerUClient:
         enable_table: bool | None = None,
         language: str | None = None,
         extra_formats: Iterable[ExtraFormat] | None = None,
+        on_upload_progress: UploadProgressCallback | None = None,
         poll_interval_seconds: float = 2.0,
     ) -> ExtractionJob:
         file_path = Path(path)
@@ -118,6 +154,7 @@ class MinerUClient:
             enable_table=enable_table,
             language=language,
             extra_formats=extra_formats,
+            on_upload_progress=on_upload_progress,
         )
         return ExtractionJob.from_batch(
             self,
@@ -216,16 +253,35 @@ class MinerUClient:
         )
         return UploadBatch.model_validate(data)
 
-    def upload_file(self, upload_url: str, path: str | Path) -> None:
-        with Path(path).open("rb") as file:
-            response = self._client.put(upload_url, content=file)
+    def upload_file(
+        self,
+        upload_url: str,
+        path: str | Path,
+        *,
+        on_progress: UploadProgressCallback | None = None,
+    ) -> None:
+        path_obj = Path(path)
+        if on_progress is None:
+            with path_obj.open("rb") as file:
+                response = self._client.put(upload_url, content=file)
+        else:
+            total_bytes = path_obj.stat().st_size
+            response = self._client.put(
+                upload_url,
+                content=_ProgressByteStream(path_obj, total_bytes, on_progress),
+                headers={"Content-Length": str(total_bytes)},
+            )
         _ = response.raise_for_status()
 
     def upload_files(
-        self, upload_urls: Iterable[str], paths: Iterable[str | Path]
+        self,
+        upload_urls: Iterable[str],
+        paths: Iterable[str | Path],
+        *,
+        on_progress: UploadProgressCallback | None = None,
     ) -> None:
         for upload_url, path in zip(upload_urls, paths, strict=True):
-            self.upload_file(upload_url, path)
+            self.upload_file(upload_url, path, on_progress=on_progress)
 
     def create_file_upload_extract_tasks(
         self,
@@ -238,6 +294,7 @@ class MinerUClient:
         callback: str | None = None,
         seed: str | None = None,
         extra_formats: Iterable[ExtraFormat] | None = None,
+        on_upload_progress: UploadProgressCallback | None = None,
     ) -> UploadBatch:
         path_tuple = tuple(Path(path) for path in paths)
         file_specs = (
@@ -254,7 +311,11 @@ class MinerUClient:
             seed=seed,
             extra_formats=extra_formats,
         )
-        self.upload_files(batch.file_urls, path_tuple)
+        self.upload_files(
+            batch.file_urls,
+            path_tuple,
+            on_progress=on_upload_progress,
+        )
         return batch
 
     def create_url_batch(
