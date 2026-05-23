@@ -5,9 +5,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar, Protocol, cast, final
 
+import click
 from click.testing import CliRunner
 from pytest import MonkeyPatch
 
+import uminer.cli as cli_module
 from uminer.cli import main, render_task_table
 from uminer.errors import MinerUTaskFailedError
 from uminer.models import ExtractionSource, ExtractionStatus, ExtractProgress, TaskPage
@@ -239,8 +241,12 @@ def test_extract_reports_progress_and_keeps_stdout_clean(
     assert "running 3/12 pages" in result.stderr
     assert result.stderr.count("running 3/12 pages") == 1
     assert "converting" in result.stderr
+    assert "extracting 12 pages · done" in result.stderr
+    assert result.stderr.count("extracting 12 pages · done") == 1
+    assert "converting · done" in result.stderr
     assert "zip URL: https://cdn.example/result.zip" in result.stderr
     assert "downloading" in result.stderr
+    assert "downloading · done" in result.stderr
     assert f"saved to {output_dir}" in result.stderr
 
 
@@ -265,6 +271,7 @@ def test_extract_uses_rgb_colors(monkeypatch: MonkeyPatch, tmp_path: Path) -> No
         ["--api-key", "token", "extract", "https://example.com/demo.pdf"],
         color=True,
     )
+    unstyled_stderr = click.unstyle(result.stderr)
 
     assert result.exit_code == 0, result.output
     # STATE blue for transitions
@@ -276,10 +283,11 @@ def test_extract_uses_rgb_colors(monkeypatch: MonkeyPatch, tmp_path: Path) -> No
     # REF teal for task IDs
     assert "\x1b[38;2;108;160;172m" in result.stderr
     assert "pending" in result.stderr
-    assert "zip URL" in result.stderr
-    assert "https://cdn.example/result.zip" in result.stderr
-    assert "saved to" in result.stderr
-    assert str(output_dir) in result.stderr
+    assert "zip URL" in unstyled_stderr
+    assert "https://cdn.example/result.zip" in unstyled_stderr
+    assert "downloading · done" in unstyled_stderr
+    assert "saved to" in unstyled_stderr
+    assert str(output_dir) in unstyled_stderr
     # No old named terminal colors
     assert "\x1b[93m" not in result.stderr
     assert "\x1b[96m" not in result.stderr
@@ -315,15 +323,65 @@ def test_extract_file_reports_upload_progress_before_submission(
     assert result.stdout == f"{output_dir}\n"
     upload_start = f"uploading {source_path} · 0%"
     upload_half = f"uploading {source_path} · 50%"
-    upload_done = f"uploading {source_path} · 100%"
+    upload_done = f"uploading {source_path} · done"
     submitted = f"submitted batch batch-1 · {source_path}"
     assert upload_start in result.stderr
     assert upload_half in result.stderr
     assert upload_done in result.stderr
+    assert f"uploading {source_path} · 100%" not in result.stderr
     assert submitted in result.stderr
     assert result.stderr.index(upload_start) < result.stderr.index(upload_half)
     assert result.stderr.index(upload_half) < result.stderr.index(upload_done)
     assert result.stderr.index(upload_done) < result.stderr.index(submitted)
+
+
+def test_upload_progress_keeps_percentage_when_path_is_truncated() -> None:
+    upload_progress_message = cast(
+        Callable[[Path, int, int], str], vars(cli_module)["_upload_progress_message"]
+    )
+    message = upload_progress_message(
+        Path("/very/long/path/to/a/document/with/a/long/name.pdf"), 37, 24
+    )
+    unstyled_message = click.unstyle(message)
+
+    assert len(unstyled_message) <= 24
+    assert unstyled_message.endswith("37%")
+    assert "…" in unstyled_message
+    assert "\x1b[38;2;140;140;140m" in message
+    assert "\x1b[38;2;120;120;120m" in message
+
+
+def test_extract_uses_singular_page_completion(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    output_dir = tmp_path / "result"
+    FakeMinerUClient.job = FakeJob(
+        source=ExtractionSource(kind="url", url="https://example.com/demo.pdf"),
+        last_status=ExtractionStatus(task_id="task-1", state=None),
+        statuses=[
+            ExtractionStatus(
+                task_id="task-1",
+                state="running",
+                extract_progress=ExtractProgress(extracted_pages=1, total_pages=1),
+            ),
+            ExtractionStatus(
+                task_id="task-1",
+                state="done",
+                full_zip_url="https://cdn.example/result.zip",
+            ),
+        ],
+        output_dir=output_dir,
+    )
+
+    result = _invoke_main(
+        ["--api-key", "token", "extract", "https://example.com/demo.pdf"],
+        color=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "extracting 1 page · done" in result.stderr
+    assert "extracting 1 pages · done" not in result.stderr
 
 
 def test_extract_failure_message_includes_task_id(monkeypatch: MonkeyPatch) -> None:

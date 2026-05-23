@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -45,6 +46,8 @@ STATE_COLORS: dict[str, RgbColor] = {
 LABEL: RgbColor = (140, 140, 140)
 PUNCT: RgbColor = (120, 120, 120)
 REF: RgbColor = (108, 160, 172)
+SPINNER_FRAME_WIDTH: int = 2
+TRUNCATION_MARKER: str = "…"
 
 
 @final
@@ -64,9 +67,15 @@ class _StatusPrinter:
                     stream=sys.stderr,
                 )
                 self._spinner.start()
+                vars(self._spinner)["_terminal_width"] = 10_000
             self._spinner.text = message
         else:
             click.echo(message, err=True)
+
+    def transient_width(self) -> int | None:
+        if not self._use_spinner:
+            return None
+        return shutil.get_terminal_size(fallback=(80, 24)).columns - SPINNER_FRAME_WIDTH
 
     def complete(self, message: str) -> None:
         if self._spinner is not None:
@@ -178,6 +187,53 @@ def _progress_message(status: ExtractionStatus) -> str:
     return f"{state} {progress.extracted_pages}/{progress.total_pages} pages"
 
 
+def _phase_done_message(label: str, label_color: CliColor | None = STATE) -> str:
+    return (
+        click.style(f"{label} ", fg=label_color)
+        + click.style("· ", fg=PUNCT)
+        + click.style("done", fg=_state_color("done"))
+    )
+
+
+def _shorten_middle(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= len(TRUNCATION_MARKER):
+        return TRUNCATION_MARKER[:max_chars]
+    keep = max_chars - len(TRUNCATION_MARKER)
+    keep_start = keep // 2
+    keep_end = keep - keep_start
+    return value[:keep_start] + TRUNCATION_MARKER + value[-keep_end:]
+
+
+def _upload_progress_message(
+    path: Path, percentage: int, max_width: int | None = None
+) -> str:
+    prefix = "uploading "
+    separator = " · "
+    suffix = f"{percentage}%"
+    path_text = _tilde(path)
+    if max_width is not None:
+        max_path_chars = max_width - len(prefix) - len(separator) - len(suffix)
+        path_text = _shorten_middle(path_text, max(1, max_path_chars))
+    return (
+        click.style(prefix, fg=LABEL)
+        + path_text
+        + click.style(separator, fg=PUNCT)
+        + suffix[:-1]
+        + click.style(suffix[-1], fg=PUNCT)
+    )
+
+
+def _upload_done_message(path: Path) -> str:
+    return _phase_done_message(f"uploading {_tilde(path)}", LABEL)
+
+
+def _extract_done_message(total_pages: int) -> str:
+    page_label = "page" if total_pages == 1 else "pages"
+    return _phase_done_message(f"extracting {total_pages} {page_label}")
+
+
 def _format_task_failure(exc: MinerUTaskFailedError) -> str:
     if exc.task_id is not None:
         return f"task {exc.task_id} failed: {exc.message}"
@@ -193,20 +249,40 @@ def _wait_for_result(
     printer: _StatusPrinter,
 ) -> Path:
     seen_message: str | None = None
+    last_state: str | None = None
+    last_total_pages: int | None = None
 
     def on_update(status: ExtractionStatus) -> None:
-        nonlocal seen_message
+        nonlocal last_state, last_total_pages, seen_message
+        state = status.state
+        progress = status.extract_progress
+        if progress is not None and progress.total_pages is not None:
+            last_total_pages = progress.total_pages
+        if (
+            last_state == "running"
+            and state in {"converting", "done"}
+            and last_total_pages is not None
+        ):
+            printer.complete(_extract_done_message(last_total_pages))
+            last_total_pages = None
+        if last_state == "converting" and state == "done":
+            printer.complete(_phase_done_message("converting"))
         message = _progress_message(status)
-        if message == seen_message:
+        if state == "done":
+            last_state = state
             return
-        printer.update(click.style(message, fg=_state_color(status.state)))
+        if message == seen_message:
+            last_state = state
+            return
+        printer.update(click.style(message, fg=_state_color(state)))
         seen_message = message
+        last_state = state
 
     def on_download_start() -> None:
         zip_url = job.last_status.full_zip_url
         if zip_url is None:
             raise RuntimeError("Extraction job missing result ZIP URL")
-        printer.update(
+        printer.complete(
             click.style("zip URL", fg=LABEL) + click.style(": ", fg=PUNCT) + zip_url
         )
         printer.update(click.style("downloading", fg=_state_color("running")))
@@ -216,6 +292,7 @@ def _wait_for_result(
         on_update=on_update,
         on_download_start=on_download_start,
     )
+    printer.complete(_phase_done_message("downloading"))
     printer.complete(click.style("saved to ", fg=LABEL) + _tilde(result.output_dir))
     return result.output_dir
 
@@ -380,12 +457,12 @@ def extract_cmd(
         percentage = 100 if total_bytes == 0 else uploaded_bytes * 100 // total_bytes
         if percentage == seen_upload_percentage:
             return
+        if percentage == 100:
+            printer.complete(_upload_done_message(path))
+            seen_upload_percentage = percentage
+            return
         printer.update(
-            click.style("uploading ", fg=LABEL)
-            + _tilde(path)
-            + click.style(" · ", fg=PUNCT)
-            + str(percentage)
-            + click.style("%", fg=PUNCT)
+            _upload_progress_message(path, percentage, printer.transient_width())
         )
         seen_upload_percentage = percentage
 
@@ -413,11 +490,7 @@ def extract_cmd(
             if not file_path.exists():
                 raise click.UsageError(f"File not found: {file_path}")
             printer.update(
-                click.style("uploading ", fg=LABEL)
-                + _tilde(file_path)
-                + click.style(" · ", fg=PUNCT)
-                + "0"
-                + click.style("%", fg=PUNCT)
+                _upload_progress_message(file_path, 0, printer.transient_width())
             )
             seen_upload_percentage = 0
             job = cli.client.extract_file(
