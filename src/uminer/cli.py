@@ -4,17 +4,64 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import final
 from urllib.parse import urlparse
 
 import click
 
 from .api import MinerUClient
-from .errors import MinerUError
+from .errors import MinerUError, MinerUTaskFailedError
 from .job import ExtractionJob
-from .models import TaskPage
+from .models import ExtractionStatus, TaskPage
 from .types import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL
 
 DEFAULT_ENV_FILE: Path = Path.home() / ".config" / "uminer" / "uminer.env"
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+type RgbColor = tuple[int, int, int]
+
+HEADER_BACKGROUND: RgbColor = (43, 43, 43)
+HEADER_FOREGROUND: RgbColor = (255, 255, 255)
+STATE_PENDING: RgbColor = (186, 140, 44)
+STATE_FAILED: RgbColor = (186, 68, 68)
+STATE_DONE: RgbColor = (86, 120, 224)
+STATE_COLORS: dict[str, RgbColor] = {
+    "waiting-file": STATE_PENDING,
+    "uploading": STATE_PENDING,
+    "pending": STATE_PENDING,
+    "running": STATE_PENDING,
+    "converting": STATE_PENDING,
+    "failed": STATE_FAILED,
+    "done": STATE_DONE,
+}
+
+
+@final
+class _StatusPrinter:
+    def __init__(self) -> None:
+        self._active: bool = False
+        self._last_width: int = 0
+
+    def line(
+        self, message: str, *, fg: RgbColor | None = None, dim: bool = False
+    ) -> None:
+        self.finish()
+        click.echo(click.style(message, fg=fg, dim=dim), err=True)
+
+    def update(self, message: str, *, fg: RgbColor | None = None) -> None:
+        padding = " " * max(0, self._last_width - len(message))
+        styled = click.style(message, fg=fg)
+        click.echo(f"\r{styled}{padding}", err=True, nl=False)
+        self._active = True
+        self._last_width = len(message)
+
+    def finish(self, message: str | None = None, *, fg: RgbColor | None = None) -> None:
+        if message is not None:
+            self.update(message, fg=fg)
+        if self._active:
+            click.echo(err=True)
+        self._active = False
+        self._last_width = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,14 +119,86 @@ def _get_ctx(ctx: click.Context) -> CLIContext:
     return obj
 
 
+def _state_color(state: str | None) -> RgbColor | None:
+    if state is None:
+        return None
+    return STATE_COLORS.get(state)
+
+
+def _job_reference(job: ExtractionJob) -> str:
+    status = job.last_status
+    if status.task_id is not None:
+        return f"task {status.task_id}"
+    if status.batch_id is not None:
+        return f"batch {status.batch_id}"
+    return "job"
+
+
+def _source_label(job: ExtractionJob) -> str:
+    source = job.source
+    if source.kind == "url":
+        if source.url is None:
+            raise RuntimeError("URL extraction job missing source URL")
+        return source.url
+    if source.path is not None:
+        return str(source.path)
+    return "file"
+
+
+def _progress_message(status: ExtractionStatus) -> str:
+    state = status.state or "submitted"
+    progress = status.extract_progress
+    if progress is None:
+        return state
+    if progress.extracted_pages is None or progress.total_pages is None:
+        return state
+    return f"{state} {progress.extracted_pages}/{progress.total_pages} pages"
+
+
+def _format_task_failure(exc: MinerUTaskFailedError) -> str:
+    if exc.task_id is not None:
+        return f"task {exc.task_id} failed: {exc.message}"
+    if exc.batch_id is not None:
+        return f"batch {exc.batch_id} failed: {exc.message}"
+    return exc.message
+
+
+def _wait_for_result(
+    job: ExtractionJob,
+    *,
+    output_dir: Path | None,
+    printer: _StatusPrinter,
+) -> Path:
+    seen_message: str | None = None
+
+    def on_update(status: ExtractionStatus) -> None:
+        nonlocal seen_message
+        message = _progress_message(status)
+        if message == seen_message:
+            return
+        printer.update(message, fg=_state_color(status.state))
+        seen_message = message
+
+    def on_download_start() -> None:
+        printer.update("downloading result", fg=STATE_DONE)
+
+    result = job.wait(
+        output_dir=output_dir,
+        on_update=on_update,
+        on_download_start=on_download_start,
+    )
+    printer.finish(f"saved to {result.output_dir}", fg=STATE_DONE)
+    return result.output_dir
+
+
 def render_task_table(page: TaskPage) -> str:
-    headers: tuple[str, str, str, str] = ("TASK_ID", "STATE", "CREATED", "FILE_NAME")
+    headers: tuple[str, str, str, str] = ("FILENAME", "STATE", "CREATED", "TASK_ID")
     rows: list[tuple[str, str, str, str]] = [
         (
-            task.task_id,
+            task.file_name,
             task.state,
             _format_created_at(task.created_at),
-            task.file_name,
+            task.task_id,
         )
         for task in page.tasks
     ]
@@ -93,12 +212,32 @@ def render_task_table(page: TaskPage) -> str:
     def fmt_row(cells: Sequence[str]) -> str:
         return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
 
-    lines: list[str] = [fmt_row(headers)]
-    lines.extend(fmt_row(row) for row in rows)
+    lines: list[str] = [
+        click.style(
+            fmt_row(headers),
+            fg=HEADER_FOREGROUND,
+            bg=HEADER_BACKGROUND,
+            bold=True,
+        )
+    ]
+    for row in rows:
+        state_text = row[1].ljust(widths[1])
+        state_color = _state_color(row[1])
+        styled_state = click.style(state_text, fg=state_color)
+        lines.append(
+            "  ".join(
+                (
+                    row[0].ljust(widths[0]),
+                    styled_state,
+                    row[2].ljust(widths[2]),
+                    row[3].ljust(widths[3]),
+                )
+            )
+        )
     return "\n".join(lines)
 
 
-@click.group(help="uminer command-line interface.")
+@click.group(help="uminer command-line interface.", context_settings=CONTEXT_SETTINGS)
 @click.option(
     "--env-file",
     type=click.Path(path_type=Path, dir_okay=False),
@@ -136,7 +275,11 @@ def main(
     _ = ctx.call_on_close(client.close)
 
 
-@main.command("extract", help="Extract a document from a URL or local file path.")
+@main.command(
+    "extract",
+    help="Extract a document from a URL or local file path.",
+    context_settings=CONTEXT_SETTINGS,
+)
 @click.argument("source", type=str)
 @click.option(
     "-o",
@@ -200,6 +343,7 @@ def extract_cmd(
     cli = _get_ctx(ctx)
     extra_formats: Iterable[str] | None = None
     _ = extra_formats  # reserved for a later flag
+    printer = _StatusPrinter()
     try:
         if _is_url(source):
             job: ExtractionJob = cli.client.extract_url(
@@ -230,13 +374,22 @@ def extract_cmd(
                 language=language,
                 poll_interval_seconds=poll_interval,
             )
-        result = job.wait(output_dir=output_dir)
+        printer.line(f"submitted {_job_reference(job)} · {_source_label(job)}")
+        result_dir = _wait_for_result(job, output_dir=output_dir, printer=printer)
+    except MinerUTaskFailedError as exc:
+        printer.finish()
+        raise click.ClickException(_format_task_failure(exc)) from exc
     except MinerUError as exc:
+        printer.finish()
         raise click.ClickException(str(exc)) from exc
-    click.echo(str(result.output_dir))
+    click.echo(str(result_dir))
 
 
-@main.command("list", help="List recent extraction tasks.")
+@main.command(
+    "list",
+    help="List recent extraction tasks.",
+    context_settings=CONTEXT_SETTINGS,
+)
 @click.option(
     "--page",
     "page_no",
@@ -275,7 +428,11 @@ def list_cmd(
         click.echo(json.dumps(page.model_dump(mode="json"), indent=2))
         return
     click.echo(render_task_table(page))
-    click.echo(f"page {page_no} · showing {len(page.tasks)} of {page.total}")
+    click.echo(
+        click.style(
+            f"page {page_no} · showing {len(page.tasks)} of {page.total}", dim=True
+        )
+    )
 
 
 if __name__ == "__main__":

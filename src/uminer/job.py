@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Protocol
 
 from .errors import MinerUResultError, MinerUTaskFailedError
 from .models import BatchExtractResult, ExtractionSource, ExtractionStatus, ExtractTask
 from .results import MinerUParsedResult
+
+type StatusCallback = Callable[[ExtractionStatus], None]
+type DownloadStartCallback = Callable[[], None]
 
 
 class MinerUClientProtocol(Protocol):
@@ -110,12 +113,22 @@ class ExtractionJob:
         )
         return self.last_status
 
-    def wait(self, *, output_dir: Path | None = None) -> MinerUParsedResult:
+    def wait(
+        self,
+        *,
+        output_dir: Path | None = None,
+        on_update: StatusCallback | None = None,
+        on_download_start: DownloadStartCallback | None = None,
+    ) -> MinerUParsedResult:
         while True:
             status = self.status()
+            if on_update is not None:
+                on_update(status)
             if status.state == "done":
                 if status.full_zip_url is None:
                     raise MinerUResultError("Extraction completed without full_zip_url")
+                if on_download_start is not None:
+                    on_download_start()
                 return self._client.download_result(
                     status.full_zip_url, output_dir=output_dir
                 )

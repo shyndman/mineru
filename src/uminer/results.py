@@ -91,12 +91,13 @@ def default_result_cache_dir(result_id: str) -> Path:
     return root / "uminer" / "results" / result_id
 
 
+# Manual extraction (vs. ZipFile.extractall) to guard against zip-slip:
+# the archive comes from a remote API, so member names are untrusted and
+# could contain `../` or absolute paths that escape output_dir.
 def _extract_zip(zip_path: Path, output_dir: Path) -> None:
     root = output_dir.resolve()
     with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            if member.is_dir():
-                continue
+        for member in [m for m in archive.infolist() if not m.is_dir()]:
             target = (output_dir / member.filename).resolve()
             if not target.is_relative_to(root):
                 raise MinerUResultError(
