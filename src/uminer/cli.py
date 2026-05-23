@@ -180,6 +180,10 @@ def _wait_for_result(
         seen_message = message
 
     def on_download_start() -> None:
+        zip_url = job.last_status.full_zip_url
+        if zip_url is None:
+            raise RuntimeError("Extraction job missing result ZIP URL")
+        printer.line(f"zip URL: {zip_url}", fg=STATE_DONE)
         printer.update("downloading result", fg=STATE_DONE)
 
     result = job.wait(

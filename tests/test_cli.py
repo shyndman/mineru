@@ -230,6 +230,7 @@ def test_extract_reports_progress_and_keeps_stdout_clean(
     assert "running 3/12 pages" in result.stderr
     assert result.stderr.count("running 3/12 pages") == 1
     assert "converting" in result.stderr
+    assert "zip URL: https://cdn.example/result.zip" in result.stderr
     assert "downloading result" in result.stderr
     assert f"saved to {output_dir}" in result.stderr
 
