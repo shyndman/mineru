@@ -29,6 +29,7 @@ _HOME_PREFIX: str = str(Path.home())
 
 HEADER_BACKGROUND: RgbColor = (38, 34, 59)
 HEADER_FOREGROUND: RgbColor = (255, 255, 255)
+STATE_DISPLAY: dict[str, str] = {"failed": "fail"}
 STATE: RgbColor = (95, 130, 220)
 STATE_FAILED: RgbColor = (186, 68, 68)
 LIST_STATE_DONE: RgbColor = (86, 120, 224)
@@ -249,7 +250,7 @@ def render_task_table(page: TaskPage) -> str:
         )
     ]
     for row in rows:
-        state_text = row[1].ljust(widths[1])
+        state_text = STATE_DISPLAY.get(row[1], row[1]).ljust(widths[1])
         state_color = _state_color(row[1])
         styled_state = click.style(state_text, fg=state_color)
         lines.append(
