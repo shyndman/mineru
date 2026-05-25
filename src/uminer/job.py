@@ -6,12 +6,17 @@ from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Protocol
 
+import httpx
+
 from .errors import MinerUResultError, MinerUTaskFailedError
 from .models import BatchExtractResult, ExtractionSource, ExtractionStatus, ExtractTask
 from .results import MinerUParsedResult
 
 type StatusCallback = Callable[[ExtractionStatus], None]
 type DownloadStartCallback = Callable[[], None]
+
+BATCH_RESULT_RETRY_COUNT = 6
+BATCH_RESULT_RETRY_DELAY_SECONDS = 10.0
 
 
 class MinerUClientProtocol(Protocol):
@@ -95,6 +100,18 @@ class ExtractionJob:
     def status(self) -> ExtractionStatus:
         return self.refresh()
 
+    def _get_batch_result_with_retry(self, batch_id: str) -> BatchExtractResult:
+        retries_remaining = BATCH_RESULT_RETRY_COUNT
+        while True:
+            try:
+                return self._client.get_batch_extract_result(batch_id)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code != 403 or retries_remaining == 0:
+                    raise
+                retries_remaining -= 1
+                time.sleep(BATCH_RESULT_RETRY_DELAY_SECONDS)
+
     def refresh(self) -> ExtractionStatus:
         if self._task_id is not None:
             self.last_status = ExtractionStatus.from_task(
@@ -103,7 +120,7 @@ class ExtractionJob:
             return self.last_status
         if self._batch_id is None:
             raise MinerUResultError("Extraction job has neither task_id nor batch_id")
-        result = self._client.get_batch_extract_result(self._batch_id)
+        result = self._get_batch_result_with_retry(self._batch_id)
         if len(result.results) != 1:
             raise MinerUResultError(
                 f"Expected one extraction result, got {len(result.results)}"

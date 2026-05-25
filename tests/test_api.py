@@ -429,6 +429,92 @@ def test_extract_file_job_reports_batch_status(tmp_path: Path) -> None:
     assert job.wait().markdown == "# Smoke\n"
 
 
+def test_extract_file_job_retries_transient_batch_403(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    batch_result_calls = 0
+    sleep_calls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal batch_result_calls
+        if request.method == "POST":
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "file_urls": ["https://uploads.example/demo.pdf"],
+                }
+            )
+        if request.method == "PUT":
+            return httpx.Response(200, request=request)
+        if str(request.url).endswith("/api/v4/extract-results/batch/batch-1"):
+            batch_result_calls += 1
+            if batch_result_calls <= 3:
+                return httpx.Response(403, request=request, text="forbidden")
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "extract_result": [
+                        {
+                            "file_name": "demo.pdf",
+                            "state": "done",
+                            "full_zip_url": "https://cdn.example/demo.zip",
+                            "err_msg": "",
+                        }
+                    ],
+                }
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    monkeypatch.setattr("uminer.job.time.sleep", sleep_calls.append)
+
+    path = tmp_path / "demo.pdf"
+    _ = path.write_bytes(b"pdf bytes")
+    client = MinerUClient(api_key="token", client=_mock_client(handler))
+    job = client.extract_file(path, poll_interval_seconds=0)
+
+    status = job()
+
+    assert status.state == "done"
+    assert batch_result_calls == 4
+    assert sleep_calls == [10.0, 10.0, 10.0]
+
+
+def test_extract_file_job_raises_after_six_transient_batch_403_retries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    batch_result_calls = 0
+    sleep_calls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal batch_result_calls
+        if request.method == "POST":
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "file_urls": ["https://uploads.example/demo.pdf"],
+                }
+            )
+        if request.method == "PUT":
+            return httpx.Response(200, request=request)
+        if str(request.url).endswith("/api/v4/extract-results/batch/batch-1"):
+            batch_result_calls += 1
+            return httpx.Response(403, request=request, text="forbidden")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    monkeypatch.setattr("uminer.job.time.sleep", sleep_calls.append)
+
+    path = tmp_path / "demo.pdf"
+    _ = path.write_bytes(b"pdf bytes")
+    client = MinerUClient(api_key="token", client=_mock_client(handler))
+    job = client.extract_file(path, poll_interval_seconds=0)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        _ = job()
+
+    assert batch_result_calls == 7
+    assert sleep_calls == [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+
+
 def test_wait_raises_for_failed_task() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
