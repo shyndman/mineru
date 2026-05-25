@@ -160,7 +160,7 @@ def _tilde(path: Path | str) -> str:
 def _styled_job_reference(job: ExtractionJob) -> str:
     status = job.last_status
     if status.task_id is not None:
-        return click.style("task ", fg=LABEL) + click.style(status.task_id, fg=REF)
+        return click.style("task ", fg=LABEL) + click.style(str(status.task_id), fg=REF)
     if status.batch_id is not None:
         return click.style("batch ", fg=LABEL) + click.style(status.batch_id, fg=REF)
     return click.style("job", fg=LABEL)
@@ -304,7 +304,7 @@ def render_task_table(page: TaskPage) -> str:
             task.file_name,
             task.state,
             _format_created_at(task.created_at),
-            task.task_id,
+            str(task.task_id),
         )
         for task in page.tasks
     ]

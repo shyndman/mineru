@@ -5,6 +5,7 @@ import os
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import cast, final, override
+from uuid import UUID
 
 import httpx
 from pydantic import PositiveInt, validate_call
@@ -209,8 +210,8 @@ class MinerUClient:
         )
         return ExtractTask.model_validate(data)
 
-    def get_extract_task(self, task_id: str) -> ExtractTask:
-        data = self._request("GET", f"/api/v4/extract/task/{task_id}")
+    def get_extract_task(self, task_id: str | UUID) -> ExtractTask:
+        data = self._request("GET", f"/api/v4/extract/task/{task_id!s}")
         return ExtractTask.model_validate(data)
 
     @validate_call

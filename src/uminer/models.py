@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import ClassVar, cast
 
 from pydantic import (
+    UUID4,
     BaseModel,
     ConfigDict,
     Field,
@@ -34,7 +35,7 @@ class ExtractProgress(MinerUModel):
 
 
 class ExtractTask(MinerUModel):
-    task_id: str
+    task_id: UUID4
     state: TaskState | str | None = None
     data_id: str | None = None
     full_zip_url: str | None = None
@@ -49,7 +50,7 @@ class TaskError(MinerUModel):
 
 class TaskListItem(MinerUModel):
     file_name: str
-    task_id: str
+    task_id: UUID4
     file_type: str | None = Field(validation_alias="type")
     state: TaskListState
     full_md_link: HttpUrl | None = None
@@ -125,7 +126,7 @@ class UploadBatch(MinerUModel):
 
 class ExtractionStatus(MinerUModel):
     state: TaskState | BatchTaskState | str | None
-    task_id: str | None = None
+    task_id: UUID4 | None = None
     batch_id: str | None = None
     file_name: str | None = None
     data_id: str | None = None

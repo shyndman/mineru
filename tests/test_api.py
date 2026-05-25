@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import pytest
@@ -21,6 +22,9 @@ from uminer import (
     MinerUTaskFailedError,
     ParagraphBlock,
 )
+
+FAKE_TASK_ID = "550e8400-e29b-41d4-a716-446655440000"
+FAKE_TASK_ID_2 = "550e8400-e29b-41d4-a716-446655440001"
 
 
 def _mock_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
@@ -68,7 +72,7 @@ def _json_response(data: Mapping[str, object]) -> httpx.Response:
 
 
 def _ok_response(_request: httpx.Request) -> httpx.Response:
-    return _json_response({"task_id": "task-1"})
+    return _json_response({"task_id": FAKE_TASK_ID})
 
 
 def test_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +101,7 @@ def test_create_extract_task_posts_expected_body() -> None:
             "enable_table": True,
             "extra_formats": ["docx", "html"],
         }
-        return _json_response({"task_id": "task-1"})
+        return _json_response({"task_id": FAKE_TASK_ID})
 
     client = MinerUClient(api_key="token", client=_mock_client(handler))
     task = client.create_extract_task(
@@ -106,17 +110,17 @@ def test_create_extract_task_posts_expected_body() -> None:
         extra_formats=["docx", "html"],
     )
 
-    assert task.task_id == "task-1"
+    assert task.task_id == UUID(FAKE_TASK_ID)
     assert len(requests) == 1
 
 
 def test_get_extract_task_maps_result() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        assert request.url.path == "/api/v4/extract/task/task-1"
+        assert request.url.path == f"/api/v4/extract/task/{FAKE_TASK_ID}"
         return _json_response(
             {
-                "task_id": "task-1",
+                "task_id": FAKE_TASK_ID,
                 "state": "running",
                 "err_msg": "",
                 "extract_progress": {
@@ -128,7 +132,7 @@ def test_get_extract_task_maps_result() -> None:
         )
 
     client = MinerUClient(api_key="token", client=_mock_client(handler))
-    task = client.get_extract_task("task-1")
+    task = client.get_extract_task(FAKE_TASK_ID)
 
     assert task.state == "running"
     assert task.extract_progress is not None
@@ -145,7 +149,7 @@ def test_list_tasks_maps_results() -> None:
                 "list": [
                     {
                         "file_name": "demo.pdf",
-                        "task_id": "task-1",
+                        "task_id": FAKE_TASK_ID,
                         "type": "pdf",
                         "state": "done",
                         "full_md_link": "https://cdn.example/full.md",
@@ -162,7 +166,7 @@ def test_list_tasks_maps_results() -> None:
                     },
                     {
                         "file_name": "broken.pdf",
-                        "task_id": "task-2",
+                        "task_id": FAKE_TASK_ID_2,
                         "type": "",
                         "state": "failed",
                         "full_md_link": "",
@@ -188,7 +192,7 @@ def test_list_tasks_maps_results() -> None:
 
     assert page.total == 2
     assert len(page.tasks) == 2
-    assert page.tasks[0].task_id == "task-1"
+    assert page.tasks[0].task_id == UUID(FAKE_TASK_ID)
     assert page.tasks[0].file_name == "demo.pdf"
     assert page.tasks[0].created_at == datetime.fromtimestamp(1778173950469 / 1000, UTC)
     assert str(page.tasks[0].full_md_link) == "https://cdn.example/full.md"
@@ -197,7 +201,7 @@ def test_list_tasks_maps_results() -> None:
     assert page.tasks[0].error is None
     assert "rank" not in page.tasks[0].model_dump()
 
-    assert page.tasks[1].task_id == "task-2"
+    assert page.tasks[1].task_id == UUID(FAKE_TASK_ID_2)
     assert page.tasks[1].file_type is None
     assert page.tasks[1].state == "failed"
     assert page.tasks[1].has_chemical_formula
@@ -315,7 +319,7 @@ def test_api_error_raises_with_code_and_trace_id() -> None:
     client = MinerUClient(api_key="token", client=_mock_client(handler))
 
     with pytest.raises(MinerUApiError) as exc_info:
-        _ = client.get_extract_task("task-1")
+        _ = client.get_extract_task(FAKE_TASK_ID)
 
     assert exc_info.value.code == "A0202"
     assert exc_info.value.trace_id == "trace-1"
@@ -354,11 +358,11 @@ def test_extract_url_job_reports_status_and_waits_for_result() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(f"{request.method} {request.url}")
         if request.method == "POST":
-            return _json_response({"task_id": "task-1"})
-        if str(request.url).endswith("/api/v4/extract/task/task-1"):
+            return _json_response({"task_id": FAKE_TASK_ID})
+        if str(request.url).endswith(f"/api/v4/extract/task/{FAKE_TASK_ID}"):
             return _json_response(
                 {
-                    "task_id": "task-1",
+                    "task_id": FAKE_TASK_ID,
                     "state": "done",
                     "full_zip_url": "https://cdn.example/result.zip",
                     "err_msg": "",
@@ -371,7 +375,7 @@ def test_extract_url_job_reports_status_and_waits_for_result() -> None:
 
     assert job.source.kind == "url"
     assert job.source.url == "https://example.com/demo.pdf"
-    assert job.last_status.task_id == "task-1"
+    assert job.last_status.task_id == UUID(FAKE_TASK_ID)
     assert job.last_status.state is None
     status = job()
     result = job.wait()
@@ -518,9 +522,9 @@ def test_extract_file_job_raises_after_six_transient_batch_403_retries(
 def test_wait_raises_for_failed_task() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            return _json_response({"task_id": "task-1"})
+            return _json_response({"task_id": FAKE_TASK_ID})
         return _json_response(
-            {"task_id": "task-1", "state": "failed", "err_msg": "Unsupported file"}
+            {"task_id": FAKE_TASK_ID, "state": "failed", "err_msg": "Unsupported file"}
         )
 
     client = MinerUClient(api_key="token", client=_mock_client(handler))
@@ -529,4 +533,4 @@ def test_wait_raises_for_failed_task() -> None:
     with pytest.raises(MinerUTaskFailedError) as exc_info:
         _ = job.wait()
 
-    assert exc_info.value.task_id == "task-1"
+    assert exc_info.value.task_id == FAKE_TASK_ID

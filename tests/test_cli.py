@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar, Protocol, cast, final
+from uuid import UUID
 
 import click
 from click.testing import CliRunner
@@ -13,6 +14,11 @@ import uminer.cli as cli_module
 from uminer.cli import main, render_task_table
 from uminer.errors import MinerUTaskFailedError
 from uminer.models import ExtractionSource, ExtractionStatus, ExtractProgress, TaskPage
+
+FAKE_TASK_ID = "550e8400-e29b-41d4-a716-446655440000"
+FAKE_TASK_ID_2 = "550e8400-e29b-41d4-a716-446655440001"
+FAKE_TASK_UUID = UUID(FAKE_TASK_ID)
+FAKE_TASK_UUID_2 = UUID(FAKE_TASK_ID_2)
 
 
 class CliResult(Protocol):
@@ -93,7 +99,7 @@ class FakeMinerUClient:
             "list": [
                 {
                     "file_name": "done.pdf",
-                    "task_id": "task-1",
+                    "task_id": FAKE_TASK_ID,
                     "type": "pdf",
                     "state": "done",
                     "full_md_link": "",
@@ -109,7 +115,7 @@ class FakeMinerUClient:
                 },
                 {
                     "file_name": "failed.pdf",
-                    "task_id": "task-2",
+                    "task_id": FAKE_TASK_ID_2,
                     "type": "pdf",
                     "state": "failed",
                     "full_md_link": "",
@@ -205,22 +211,22 @@ def test_extract_reports_progress_and_keeps_stdout_clean(
     output_dir = tmp_path / "result"
     FakeMinerUClient.job = FakeJob(
         source=ExtractionSource(kind="url", url="https://example.com/demo.pdf"),
-        last_status=ExtractionStatus(task_id="task-1", state=None),
+        last_status=ExtractionStatus(task_id=FAKE_TASK_UUID, state=None),
         statuses=[
-            ExtractionStatus(task_id="task-1", state="pending"),
+            ExtractionStatus(task_id=FAKE_TASK_UUID, state="pending"),
             ExtractionStatus(
-                task_id="task-1",
+                task_id=FAKE_TASK_UUID,
                 state="running",
                 extract_progress=ExtractProgress(extracted_pages=3, total_pages=12),
             ),
             ExtractionStatus(
-                task_id="task-1",
+                task_id=FAKE_TASK_UUID,
                 state="running",
                 extract_progress=ExtractProgress(extracted_pages=3, total_pages=12),
             ),
-            ExtractionStatus(task_id="task-1", state="converting"),
+            ExtractionStatus(task_id=FAKE_TASK_UUID, state="converting"),
             ExtractionStatus(
-                task_id="task-1",
+                task_id=FAKE_TASK_UUID,
                 state="done",
                 full_zip_url="https://cdn.example/result.zip",
             ),
@@ -236,7 +242,9 @@ def test_extract_reports_progress_and_keeps_stdout_clean(
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{output_dir}\n"
     assert "\r" not in result.stderr
-    assert "submitted task task-1 · https://example.com/demo.pdf" in result.stderr
+    assert (
+        f"submitted task {FAKE_TASK_ID} · https://example.com/demo.pdf" in result.stderr
+    )
     assert "pending" in result.stderr
     assert "running 3/12 pages" in result.stderr
     assert result.stderr.count("running 3/12 pages") == 1
@@ -255,11 +263,11 @@ def test_extract_uses_rgb_colors(monkeypatch: MonkeyPatch, tmp_path: Path) -> No
     output_dir = tmp_path / "result"
     FakeMinerUClient.job = FakeJob(
         source=ExtractionSource(kind="url", url="https://example.com/demo.pdf"),
-        last_status=ExtractionStatus(task_id="task-1", state=None),
+        last_status=ExtractionStatus(task_id=FAKE_TASK_UUID, state=None),
         statuses=[
-            ExtractionStatus(task_id="task-1", state="pending"),
+            ExtractionStatus(task_id=FAKE_TASK_UUID, state="pending"),
             ExtractionStatus(
-                task_id="task-1",
+                task_id=FAKE_TASK_UUID,
                 state="done",
                 full_zip_url="https://cdn.example/result.zip",
             ),
@@ -358,15 +366,15 @@ def test_extract_uses_singular_page_completion(
     output_dir = tmp_path / "result"
     FakeMinerUClient.job = FakeJob(
         source=ExtractionSource(kind="url", url="https://example.com/demo.pdf"),
-        last_status=ExtractionStatus(task_id="task-1", state=None),
+        last_status=ExtractionStatus(task_id=FAKE_TASK_UUID, state=None),
         statuses=[
             ExtractionStatus(
-                task_id="task-1",
+                task_id=FAKE_TASK_UUID,
                 state="running",
                 extract_progress=ExtractProgress(extracted_pages=1, total_pages=1),
             ),
             ExtractionStatus(
-                task_id="task-1",
+                task_id=FAKE_TASK_UUID,
                 state="done",
                 full_zip_url="https://cdn.example/result.zip",
             ),
@@ -388,9 +396,9 @@ def test_extract_failure_message_includes_task_id(monkeypatch: MonkeyPatch) -> N
     monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
     FakeMinerUClient.job = FakeJob(
         source=ExtractionSource(kind="url", url="https://example.com/demo.pdf"),
-        last_status=ExtractionStatus(task_id="task-1", state=None),
-        statuses=[ExtractionStatus(task_id="task-1", state="failed")],
-        failure=MinerUTaskFailedError("Unsupported file", task_id="task-1"),
+        last_status=ExtractionStatus(task_id=FAKE_TASK_UUID, state=None),
+        statuses=[ExtractionStatus(task_id=FAKE_TASK_UUID, state="failed")],
+        failure=MinerUTaskFailedError("Unsupported file", task_id=FAKE_TASK_ID),
     )
 
     result = _invoke_main(
@@ -399,7 +407,7 @@ def test_extract_failure_message_includes_task_id(monkeypatch: MonkeyPatch) -> N
     )
 
     assert result.exit_code != 0
-    assert "task task-1 failed: Unsupported file" in result.stderr
+    assert f"task {FAKE_TASK_ID} failed: Unsupported file" in result.stderr
 
 
 def test_render_task_table_uses_renamed_header() -> None:
@@ -408,7 +416,7 @@ def test_render_task_table_uses_renamed_header() -> None:
             "list": [
                 {
                     "file_name": "demo.pdf",
-                    "task_id": "task-1",
+                    "task_id": FAKE_TASK_ID,
                     "type": "pdf",
                     "state": "done",
                     "full_md_link": "",

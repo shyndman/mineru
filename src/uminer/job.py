@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 import httpx
 
@@ -20,7 +21,7 @@ BATCH_RESULT_RETRY_DELAY_SECONDS = 10.0
 
 
 class MinerUClientProtocol(Protocol):
-    def get_extract_task(self, task_id: str) -> ExtractTask: ...
+    def get_extract_task(self, task_id: str | UUID) -> ExtractTask: ...
     def get_batch_extract_result(self, batch_id: str) -> BatchExtractResult: ...
     def download_result(
         self, full_zip_url: str, *, output_dir: Path | None = None
@@ -29,7 +30,7 @@ class MinerUClientProtocol(Protocol):
 
 class ExtractionJob:
     _client: MinerUClientProtocol
-    _task_id: str | None
+    _task_id: str | UUID | None
     _batch_id: str | None
     _poll_interval_seconds: float
     source: ExtractionSource
@@ -41,7 +42,7 @@ class ExtractionJob:
         *,
         source: ExtractionSource,
         status: ExtractionStatus,
-        task_id: str | None = None,
+        task_id: str | UUID | None = None,
         batch_id: str | None = None,
         poll_interval_seconds: float = 2.0,
     ) -> None:
@@ -56,7 +57,7 @@ class ExtractionJob:
     def from_task(
         cls,
         client: MinerUClientProtocol,
-        task_id: str,
+        task_id: str | UUID,
         *,
         source: ExtractionSource,
         status: ExtractionStatus,
@@ -152,7 +153,7 @@ class ExtractionJob:
             if status.state == "failed":
                 raise MinerUTaskFailedError(
                     status.err_msg or "MinerU extraction failed",
-                    task_id=status.task_id,
+                    task_id=str(status.task_id) if status.task_id is not None else None,
                     batch_id=status.batch_id,
                 )
             time.sleep(self._poll_interval_seconds)
