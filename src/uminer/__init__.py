@@ -21,7 +21,7 @@ from .errors import (
     MinerUResultError,
     MinerUTaskFailedError,
 )
-from .job import ExtractionJob
+from .job import ExtractionBatch, ExtractionBatchItemResult, ExtractionJob
 from .models import (
     BatchExtractResult,
     BatchExtractTask,
@@ -42,6 +42,8 @@ __all__ = [
     "ContentBlock",
     "ContentList",
     "ContentPage",
+    "ExtractionBatch",
+    "ExtractionBatchItemResult",
     "ExtractionJob",
     "ExtractionSource",
     "ExtractionStatus",

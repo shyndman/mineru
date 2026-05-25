@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from pytest import MonkeyPatch
 
 import uminer.cli as cli_module
+from uminer import ExtractionBatchItemResult
 from uminer.cli import main, render_task_table
 from uminer.errors import MinerUTaskFailedError
 from uminer.models import ExtractionSource, ExtractionStatus, ExtractProgress, TaskPage
@@ -93,6 +94,56 @@ class FakeJob:
 
 
 @final
+class FakeBatch:
+    sources: tuple[ExtractionSource, ...]
+    last_statuses: tuple[ExtractionStatus, ...]
+    item_results: tuple[ExtractionBatchItemResult | None, ...]
+    _status_updates: tuple[tuple[ExtractionStatus, ...], ...]
+    _final_results: tuple[ExtractionBatchItemResult, ...]
+
+    def __init__(
+        self,
+        *,
+        sources: tuple[ExtractionSource, ...],
+        last_statuses: tuple[ExtractionStatus, ...],
+        item_results: tuple[ExtractionBatchItemResult | None, ...],
+        status_updates: tuple[tuple[ExtractionStatus, ...], ...],
+        final_results: tuple[ExtractionBatchItemResult, ...],
+    ) -> None:
+        self.sources = sources
+        self.last_statuses = last_statuses
+        self.item_results = item_results
+        self._status_updates = status_updates
+        self._final_results = final_results
+
+    def wait(
+        self,
+        *,
+        output_dir: Path | None = None,
+        on_update: Callable[[tuple[ExtractionStatus, ...]], None] | None = None,
+        on_download_start: Callable[[int, ExtractionStatus], None] | None = None,
+        on_item_result: Callable[[int, ExtractionBatchItemResult], None] | None = None,
+    ) -> tuple[ExtractionBatchItemResult, ...]:
+        del output_dir
+        for index, result in enumerate(self.item_results):
+            if result is not None and on_item_result is not None:
+                on_item_result(index, result)
+        for statuses in self._status_updates:
+            self.last_statuses = statuses
+            if on_update is not None:
+                on_update(statuses)
+        for index, result in enumerate(self._final_results):
+            if self.item_results[index] is not None:
+                continue
+            if result.error is None and on_download_start is not None:
+                on_download_start(index, result.status)
+            if on_item_result is not None:
+                on_item_result(index, result)
+        self.item_results = self._final_results
+        return self._final_results
+
+
+@final
 class FakeMinerUClient:
     page: ClassVar[TaskPage] = TaskPage.model_validate(
         {
@@ -135,6 +186,7 @@ class FakeMinerUClient:
         }
     )
     job: FakeJob | None = None
+    batch: FakeBatch | None = None
 
     api_key: str
     base_url: str
@@ -156,6 +208,12 @@ class FakeMinerUClient:
             raise AssertionError("test did not configure FakeMinerUClient.job")
         return self.job
 
+    def extract_urls(self, sources: tuple[str, ...], **_: object) -> FakeBatch:
+        del sources
+        if self.batch is None:
+            raise AssertionError("test did not configure FakeMinerUClient.batch")
+        return self.batch
+
     def extract_file(self, source: Path, **_: object) -> FakeJob:
         on_upload_progress = cast(
             Callable[[Path, int, int], None] | None, _.get("on_upload_progress")
@@ -170,11 +228,30 @@ class FakeMinerUClient:
             raise AssertionError("test did not configure FakeMinerUClient.job")
         return self.job
 
+    def extract_files(self, sources: tuple[Path, ...], **_: object) -> FakeBatch:
+        on_upload_progress = cast(
+            Callable[[int, Path, int, int], None] | None, _.get("on_upload_progress")
+        )
+        if on_upload_progress is not None:
+            for index, source in enumerate(sources):
+                total_bytes = source.stat().st_size
+                on_upload_progress(index, source, total_bytes, total_bytes)
+        if self.batch is None:
+            raise AssertionError("test did not configure FakeMinerUClient.batch")
+        return self.batch
+
     get_extract_task_result: ClassVar[object] = None
     download_result_value: ClassVar[object] = None
+    get_extract_task_results: ClassVar[dict[str, object] | None] = None
+    download_result_values: ClassVar[dict[str, object] | None] = None
 
     def get_extract_task(self, task_id: str | object) -> object:
-        del task_id
+        if (
+            isinstance(task_id, str)
+            and self.get_extract_task_results is not None
+            and task_id in self.get_extract_task_results
+        ):
+            return self.get_extract_task_results[task_id]
         if self.get_extract_task_result is None:
             raise AssertionError(
                 "test did not configure FakeMinerUClient.get_extract_task_result"
@@ -184,7 +261,12 @@ class FakeMinerUClient:
     def download_result(
         self, full_zip_url: str, *, output_dir: object = None
     ) -> object:
-        del full_zip_url, output_dir
+        del output_dir
+        if (
+            self.download_result_values is not None
+            and full_zip_url in self.download_result_values
+        ):
+            return self.download_result_values[full_zip_url]
         if self.download_result_value is None:
             raise AssertionError(
                 "test did not configure FakeMinerUClient.download_result_value"
@@ -512,3 +594,225 @@ def test_extract_by_task_id_errors_if_not_done(monkeypatch: MonkeyPatch) -> None
         f"Task {FAKE_TASK_ID} is not done" in result.stderr
         or f"Task {FAKE_TASK_ID} is not done" in result.output
     )
+
+
+def test_extract_multiple_urls_reports_ordinal_results_and_continues(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    output_dir = tmp_path / "out"
+    success_dir = output_dir / "001-demo.pdf"
+    batch_sources = (
+        ExtractionSource(kind="url", url="https://example.com/demo.pdf"),
+        ExtractionSource(kind="url", url="https://example.com/broken.pdf"),
+    )
+    success_status = ExtractionStatus(
+        batch_id="batch-1",
+        state="done",
+        file_name="demo.pdf",
+        full_zip_url="https://cdn.example/demo.zip",
+    )
+    failed_status = ExtractionStatus(
+        batch_id="batch-1",
+        state="failed",
+        file_name="broken.pdf",
+        err_msg="Unsupported file",
+    )
+    FakeMinerUClient.batch = FakeBatch(
+        sources=batch_sources,
+        last_statuses=(
+            ExtractionStatus(batch_id="batch-1", state=None),
+            ExtractionStatus(batch_id="batch-1", state=None),
+        ),
+        item_results=(None, None),
+        status_updates=(
+            (
+                ExtractionStatus(batch_id="batch-1", state="running"),
+                ExtractionStatus(batch_id="batch-1", state="pending"),
+            ),
+        ),
+        final_results=(
+            ExtractionBatchItemResult(
+                source=batch_sources[0],
+                status=success_status,
+                output_dir=success_dir,
+            ),
+            ExtractionBatchItemResult(
+                source=batch_sources[1],
+                status=failed_status,
+                error=MinerUTaskFailedError("Unsupported file", batch_id="batch-1"),
+            ),
+        ),
+    )
+
+    result = _invoke_main(
+        [
+            "--api-key",
+            "token",
+            "extract",
+            "https://example.com/demo.pdf",
+            "https://example.com/broken.pdf",
+            "-o",
+            str(output_dir),
+        ]
+    )
+
+    assert result.exit_code != 0
+    assert result.stdout == f"{success_dir}\n"
+    assert "1. submitted batch batch-1 · https://example.com/demo.pdf" in result.stderr
+    assert (
+        "2. submitted batch batch-1 · https://example.com/broken.pdf" in result.stderr
+    )
+    assert f"1. saved to {success_dir}" in result.stderr
+    assert "2. failed · Unsupported file" in result.stderr
+
+
+def test_extract_multiple_files_reports_upload_failures_and_successes(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    _ = first.write_bytes(b"one")
+    _ = second.write_bytes(b"two")
+    output_dir = tmp_path / "out"
+    success_dir = output_dir / "001-one.pdf"
+    batch_sources = (
+        ExtractionSource(kind="file", path=first, file={"name": first.name}),
+        ExtractionSource(kind="file", path=second, file={"name": second.name}),
+    )
+    failed_status = ExtractionStatus(
+        batch_id="batch-1",
+        state="failed",
+        file_name=second.name,
+        err_msg="upload denied",
+    )
+    FakeMinerUClient.batch = FakeBatch(
+        sources=batch_sources,
+        last_statuses=(
+            ExtractionStatus(
+                batch_id="batch-1",
+                state="waiting-file",
+                file_name=first.name,
+            ),
+            failed_status,
+        ),
+        item_results=(
+            None,
+            ExtractionBatchItemResult(
+                source=batch_sources[1],
+                status=failed_status,
+                error=RuntimeError("upload denied"),
+            ),
+        ),
+        status_updates=(
+            (
+                ExtractionStatus(
+                    batch_id="batch-1",
+                    state="running",
+                    file_name=first.name,
+                ),
+                failed_status,
+            ),
+        ),
+        final_results=(
+            ExtractionBatchItemResult(
+                source=batch_sources[0],
+                status=ExtractionStatus(
+                    batch_id="batch-1",
+                    state="done",
+                    file_name=first.name,
+                    full_zip_url="https://cdn.example/one.zip",
+                ),
+                output_dir=success_dir,
+            ),
+            ExtractionBatchItemResult(
+                source=batch_sources[1],
+                status=failed_status,
+                error=RuntimeError("upload denied"),
+            ),
+        ),
+    )
+
+    result = _invoke_main(
+        [
+            "--api-key",
+            "token",
+            "extract",
+            str(first),
+            str(second),
+            "-o",
+            str(output_dir),
+        ]
+    )
+
+    assert result.exit_code != 0
+    assert result.stdout == f"{success_dir}\n"
+    assert f"1. submitted batch batch-1 · {first}" in result.stderr
+    assert "2. failed · upload denied" in result.stderr
+    assert f"1. saved to {success_dir}" in result.stderr
+
+
+def test_extract_multiple_task_ids_reports_each_result(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    from uminer.models import ExtractTask
+
+    output_dir = tmp_path / "out"
+    success_dir = output_dir / f"001-{FAKE_TASK_ID}"
+    FakeMinerUClient.get_extract_task_results = {
+        FAKE_TASK_ID: ExtractTask(
+            task_id=FAKE_TASK_UUID,
+            state="done",
+            full_zip_url="https://cdn.example/result.zip",
+        ),
+        FAKE_TASK_ID_2: ExtractTask(
+            task_id=FAKE_TASK_UUID_2,
+            state="running",
+        ),
+    }
+    FakeMinerUClient.download_result_values = {
+        "https://cdn.example/result.zip": FakeResult(success_dir)
+    }
+
+    result = _invoke_main(
+        [
+            "--api-key",
+            "token",
+            "extract",
+            FAKE_TASK_ID,
+            FAKE_TASK_ID_2,
+            "-o",
+            str(output_dir),
+        ]
+    )
+
+    assert result.exit_code != 0
+    assert result.stdout == f"{success_dir}\n"
+    assert f"1. saved to {success_dir}" in result.stderr
+    assert (
+        f"2. failed · task {FAKE_TASK_ID_2} is not done (state: running)"
+        in result.stderr
+    )
+
+
+def test_extract_rejects_mixed_source_kinds(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    source_path = tmp_path / "demo.pdf"
+    _ = source_path.write_bytes(b"demo")
+
+    result = _invoke_main(
+        [
+            "--api-key",
+            "token",
+            "extract",
+            str(source_path),
+            "https://example.com/demo.pdf",
+        ]
+    )
+
+    assert result.exit_code != 0
+    assert "same kind" in result.stderr or "same kind" in result.output

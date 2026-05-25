@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import zipfile
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -14,6 +15,8 @@ import pytest
 from pydantic import ValidationError
 
 from uminer import (
+    ExtractionBatch,
+    ExtractionBatchItemResult,
     ExtractionJob,
     MinerUApiError,
     MinerUClient,
@@ -431,6 +434,156 @@ def test_extract_file_job_reports_batch_status(tmp_path: Path) -> None:
     assert job().state == "done"
     assert job.last_status.state == "done"
     assert job.wait().markdown == "# Smoke\n"
+
+
+def test_extract_urls_waits_for_each_batch_item_and_collects_failures(
+    tmp_path: Path,
+) -> None:
+    zip_bytes = _result_zip_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            assert request.url.path == "/api/v4/extract/task/batch"
+            return _json_response({"batch_id": "batch-1"})
+        if str(request.url).endswith("/api/v4/extract-results/batch/batch-1"):
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "extract_result": [
+                        {
+                            "file_name": "demo.pdf",
+                            "data_id": "uminer-1",
+                            "state": "done",
+                            "full_zip_url": "https://cdn.example/demo.zip",
+                            "err_msg": "",
+                        },
+                        {
+                            "file_name": "broken.pdf",
+                            "data_id": "uminer-2",
+                            "state": "failed",
+                            "err_msg": "Unsupported file",
+                        },
+                    ],
+                }
+            )
+        assert str(request.url) == "https://cdn.example/demo.zip"
+        return httpx.Response(200, content=zip_bytes)
+
+    client = MinerUClient(api_key="token", client=_mock_client(handler))
+    batch = client.extract_urls(
+        ["https://example.com/demo.pdf", "https://example.com/broken.pdf"],
+        poll_interval_seconds=0,
+    )
+
+    assert isinstance(batch, ExtractionBatch)
+    results = batch.wait(output_dir=tmp_path / "out")
+
+    assert len(results) == 2
+    assert results[0].ok
+    assert results[0].output_dir == tmp_path / "out" / "001-demo.pdf"
+    assert results[0].result is not None
+    assert results[0].result.markdown == "# Smoke\n"
+    assert not results[1].ok
+    assert isinstance(results[1].error, MinerUTaskFailedError)
+    assert results[1].status.state == "failed"
+    assert results[1].status.err_msg == "Unsupported file"
+
+
+def test_extract_files_uploads_in_parallel(tmp_path: Path) -> None:
+    first_started = threading.Event()
+    second_started = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "file_urls": [
+                        "https://uploads.example/one.pdf",
+                        "https://uploads.example/two.pdf",
+                    ],
+                }
+            )
+        if str(request.url) == "https://uploads.example/one.pdf":
+            first_started.set()
+            assert second_started.wait(0.5)
+            return httpx.Response(200)
+        assert str(request.url) == "https://uploads.example/two.pdf"
+        second_started.set()
+        return httpx.Response(200)
+
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    _ = first.write_bytes(b"one")
+    _ = second.write_bytes(b"two")
+    client = MinerUClient(api_key="token", client=_mock_client(handler))
+
+    batch = client.extract_files([first, second], max_upload_workers=2)
+
+    assert isinstance(batch, ExtractionBatch)
+    assert batch.item_results == (None, None)
+    assert first_started.is_set()
+    assert second_started.is_set()
+
+
+def test_extract_files_preserves_upload_failures_and_waits_for_successes(
+    tmp_path: Path,
+) -> None:
+    zip_bytes = _result_zip_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "file_urls": [
+                        "https://uploads.example/one.pdf",
+                        "https://uploads.example/two.pdf",
+                    ],
+                }
+            )
+        if str(request.url) == "https://uploads.example/one.pdf":
+            return httpx.Response(500, request=request, text="boom")
+        if str(request.url).endswith("/api/v4/extract-results/batch/batch-1"):
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "extract_result": [
+                        {
+                            "file_name": "two.pdf",
+                            "data_id": "uminer-2",
+                            "state": "done",
+                            "full_zip_url": "https://cdn.example/two.zip",
+                            "err_msg": "",
+                        }
+                    ],
+                }
+            )
+        if str(request.url) == "https://cdn.example/two.zip":
+            return httpx.Response(200, content=zip_bytes)
+        assert str(request.url) == "https://uploads.example/two.pdf"
+        return httpx.Response(200)
+
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    _ = first.write_bytes(b"one")
+    _ = second.write_bytes(b"two")
+    client = MinerUClient(api_key="token", client=_mock_client(handler))
+
+    batch = client.extract_files([first, second], poll_interval_seconds=0)
+    results = batch.wait(output_dir=tmp_path / "out")
+
+    assert len(results) == 2
+    assert not results[0].ok
+    assert results[0].status.state == "failed"
+    assert results[0].result is None
+    assert results[0].output_dir is None
+    assert results[0].error is not None
+    assert isinstance(results[0], ExtractionBatchItemResult)
+    assert results[1].ok
+    assert results[1].output_dir == tmp_path / "out" / "002-two.pdf"
+    assert results[1].result is not None
+    assert results[1].result.markdown == "# Smoke\n"
 
 
 def test_extract_file_job_retries_transient_batch_403(

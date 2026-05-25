@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import cast, final, override
 from uuid import UUID
@@ -11,7 +12,7 @@ import httpx
 from pydantic import PositiveInt, validate_call
 
 from .errors import MinerUApiError, MinerUConfigError
-from .job import ExtractionJob
+from .job import ExtractionBatch, ExtractionBatchItemResult, ExtractionJob
 from .models import (
     BatchExtractResult,
     ExtractionSource,
@@ -31,8 +32,10 @@ from .types import (
 )
 
 type UploadProgressCallback = Callable[[Path, int, int], None]
+type BatchUploadProgressCallback = Callable[[int, Path, int, int], None]
 
 UPLOAD_CHUNK_SIZE = 64 * 1024
+DEFAULT_BATCH_UPLOAD_WORKERS = 4
 
 
 @final
@@ -167,6 +170,129 @@ class MinerUClient:
                 file_name=str(file_spec.get("name", file_path.name)),
             ),
             poll_interval_seconds=poll_interval_seconds,
+        )
+
+    def extract_urls(
+        self,
+        urls: Iterable[str],
+        *,
+        is_ocr: bool | None = None,
+        enable_formula: bool | None = None,
+        enable_table: bool | None = None,
+        language: str | None = None,
+        extra_formats: Iterable[ExtraFormat] | None = None,
+        page_ranges: str | None = None,
+        no_cache: bool | None = None,
+        cache_tolerance: int | None = None,
+        poll_interval_seconds: float = 2.0,
+    ) -> ExtractionBatch:
+        del is_ocr, page_ranges
+        url_tuple = tuple(urls)
+        if not url_tuple:
+            raise ValueError("Expected at least one URL")
+        item_data_ids = tuple(
+            _batch_item_data_id(index) for index in range(len(url_tuple))
+        )
+        batch_id = self.create_url_batch(
+            [
+                {"url": url, "data_id": data_id}
+                for url, data_id in zip(url_tuple, item_data_ids, strict=True)
+            ],
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+            language=language,
+            extra_formats=extra_formats,
+            no_cache=no_cache,
+            cache_tolerance=cache_tolerance,
+        )
+        sources = tuple(ExtractionSource(kind="url", url=url) for url in url_tuple)
+        statuses = tuple(
+            ExtractionStatus(batch_id=batch_id, state=None, data_id=data_id)
+            for data_id in item_data_ids
+        )
+        return ExtractionBatch.from_batch(
+            self,
+            batch_id,
+            sources=sources,
+            statuses=statuses,
+            item_data_ids=item_data_ids,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    def extract_files(
+        self,
+        paths: Iterable[str | Path],
+        *,
+        enable_formula: bool | None = None,
+        enable_table: bool | None = None,
+        language: str | None = None,
+        extra_formats: Iterable[ExtraFormat] | None = None,
+        on_upload_progress: BatchUploadProgressCallback | None = None,
+        poll_interval_seconds: float = 2.0,
+        max_upload_workers: int = DEFAULT_BATCH_UPLOAD_WORKERS,
+    ) -> ExtractionBatch:
+        path_tuple = tuple(Path(path) for path in paths)
+        if not path_tuple:
+            raise ValueError("Expected at least one file path")
+        item_data_ids = tuple(
+            _batch_item_data_id(index) for index in range(len(path_tuple))
+        )
+        file_specs = [
+            {"name": path.name, "data_id": data_id}
+            for path, data_id in zip(path_tuple, item_data_ids, strict=True)
+        ]
+        batch = self.create_upload_batch(
+            file_specs,
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+            language=language,
+            extra_formats=extra_formats,
+        )
+        upload_errors = self._upload_batch_files(
+            tuple(batch.file_urls),
+            path_tuple,
+            on_progress=on_upload_progress,
+            max_upload_workers=max_upload_workers,
+        )
+        sources = tuple(
+            ExtractionSource(kind="file", path=path, file=file_spec)
+            for path, file_spec in zip(path_tuple, file_specs, strict=True)
+        )
+        statuses: list[ExtractionStatus] = []
+        results: list[ExtractionBatchItemResult | None] = []
+        for index, source in enumerate(sources):
+            file_name = file_specs[index]["name"]
+            error = upload_errors.get(index)
+            if error is None:
+                statuses.append(
+                    ExtractionStatus(
+                        batch_id=batch.batch_id,
+                        state="waiting-file",
+                        file_name=file_name,
+                        data_id=item_data_ids[index],
+                    )
+                )
+                results.append(None)
+                continue
+            status = ExtractionStatus(
+                batch_id=batch.batch_id,
+                state="failed",
+                file_name=file_name,
+                data_id=item_data_ids[index],
+                err_msg=str(error),
+            )
+            statuses.append(status)
+            results.append(
+                ExtractionBatchItemResult(source=source, status=status, error=error)
+            )
+        return ExtractionBatch.from_batch(
+            self,
+            batch.batch_id,
+            sources=sources,
+            statuses=tuple(statuses),
+            item_data_ids=item_data_ids,
+            poll_interval_seconds=poll_interval_seconds,
+            results=tuple(results),
         )
 
     def create_extract_task(
@@ -319,6 +445,58 @@ class MinerUClient:
         )
         return batch
 
+    def _upload_batch_files(
+        self,
+        upload_urls: tuple[str, ...],
+        paths: tuple[Path, ...],
+        *,
+        on_progress: BatchUploadProgressCallback | None,
+        max_upload_workers: int,
+    ) -> dict[int, Exception]:
+        if len(upload_urls) != len(paths):
+            raise ValueError("Expected one upload URL per path")
+        if max_upload_workers < 1:
+            raise ValueError("max_upload_workers must be at least 1")
+
+        def upload_one(index: int, upload_url: str, path: Path) -> None:
+            progress_callback = on_progress
+            if progress_callback is not None:
+
+                def on_file_progress(
+                    current_path: Path, uploaded: int, total: int
+                ) -> None:
+                    progress_callback(index, current_path, uploaded, total)
+
+                self.upload_file(upload_url, path, on_progress=on_file_progress)
+                return
+            self.upload_file(upload_url, path)
+
+        errors: dict[int, Exception] = {}
+        worker_count = min(max_upload_workers, len(paths))
+        if worker_count == 1:
+            for index, (upload_url, path) in enumerate(
+                zip(upload_urls, paths, strict=True)
+            ):
+                try:
+                    upload_one(index, upload_url, path)
+                except Exception as exc:
+                    errors[index] = exc
+            return errors
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(upload_one, index, upload_url, path): index
+                for index, (upload_url, path) in enumerate(
+                    zip(upload_urls, paths, strict=True)
+                )
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    errors[futures[future]] = exc
+        return errors
+
     def create_url_batch(
         self,
         files: Iterable[FileSpec],
@@ -425,6 +603,10 @@ def _required_int_or_str(data: Mapping[str, object], key: str) -> int | str:
     if not isinstance(value, int | str):
         raise TypeError(f"Expected {key} to be int or str")
     return value
+
+
+def _batch_item_data_id(index: int) -> str:
+    return f"uminer-{index + 1}"
 
 
 def _result_id(full_zip_url: str) -> str:
