@@ -170,6 +170,27 @@ class FakeMinerUClient:
             raise AssertionError("test did not configure FakeMinerUClient.job")
         return self.job
 
+    get_extract_task_result: ClassVar[object] = None
+    download_result_value: ClassVar[object] = None
+
+    def get_extract_task(self, task_id: str | object) -> object:
+        del task_id
+        if self.get_extract_task_result is None:
+            raise AssertionError(
+                "test did not configure FakeMinerUClient.get_extract_task_result"
+            )
+        return self.get_extract_task_result
+
+    def download_result(
+        self, full_zip_url: str, *, output_dir: object = None
+    ) -> object:
+        del full_zip_url, output_dir
+        if self.download_result_value is None:
+            raise AssertionError(
+                "test did not configure FakeMinerUClient.download_result_value"
+            )
+        return self.download_result_value
+
 
 def test_short_help_aliases_show_help(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
@@ -444,3 +465,50 @@ def test_render_task_table_uses_renamed_header() -> None:
     assert rendered.index("FILENAME") < rendered.index("STATE")
     assert rendered.index("STATE") < rendered.index("CREATED")
     assert rendered.index("CREATED") < rendered.index("TASK_ID")
+
+
+def test_extract_by_task_id_downloads_result(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    from uminer.models import ExtractTask
+
+    output_dir = tmp_path / "result"
+    FakeMinerUClient.get_extract_task_result = ExtractTask(
+        task_id=FAKE_TASK_UUID,
+        state="done",
+        full_zip_url="https://cdn.example/result.zip",
+    )
+
+    FakeMinerUClient.download_result_value = FakeResult(output_dir)
+
+    result = _invoke_main(
+        ["--api-key", "token", "extract", FAKE_TASK_ID],
+        color=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{output_dir}\n"
+    assert "downloading · done" in result.stderr
+    assert f"saved to {output_dir}" in result.stderr
+
+
+def test_extract_by_task_id_errors_if_not_done(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
+    from uminer.models import ExtractTask
+
+    FakeMinerUClient.get_extract_task_result = ExtractTask(
+        task_id=FAKE_TASK_UUID,
+        state="running",
+    )
+
+    result = _invoke_main(
+        ["--api-key", "token", "extract", FAKE_TASK_ID],
+        color=False,
+    )
+
+    assert result.exit_code != 0
+    assert (
+        f"Task {FAKE_TASK_ID} is not done" in result.stderr
+        or f"Task {FAKE_TASK_ID} is not done" in result.output
+    )

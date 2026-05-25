@@ -10,7 +10,7 @@ MODEL_VERSION: Literal["vlm"] = "vlm"
 type Json = object
 type FileSpec = Mapping[str, object]
 
-ExtractionSourceKind = Literal["url", "file"]
+ExtractionSourceKind = Literal["url", "file", "task"]
 ExtraFormat = Literal["docx", "html", "latex"]
 TaskState = Literal["done", "pending", "running", "failed", "converting"]
 TaskListState = Literal[

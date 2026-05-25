@@ -163,3 +163,4 @@ class ExtractionSource(MinerUModel):
     path: Path | None = None
     url: str | None = None
     file: FileSpec | None = None
+    task_id: UUID4 | None = None

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import Iterable, Sequence
@@ -129,8 +130,18 @@ def _resolve_api_key(*, explicit: str | None, env_file: Path) -> str:
     raise click.UsageError(message)
 
 
+_UUID4_RE: re.Pattern[str] = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
 def _is_url(source: str) -> bool:
     return urlparse(source).scheme in {"http", "https"}
+
+
+def _is_uuid4(source: str) -> bool:
+    return _UUID4_RE.match(source) is not None
 
 
 def _format_created_at(value: datetime) -> str:
@@ -477,6 +488,24 @@ def extract_cmd(
                 page_ranges=page_ranges,
                 poll_interval_seconds=poll_interval,
             )
+        elif _is_uuid4(source) and not Path(source).exists():
+            task = cli.client.get_extract_task(source)
+            if task.state != "done":
+                raise click.UsageError(
+                    f"Task {source} is not done (state: {task.state})"
+                )
+            if task.full_zip_url is None:
+                raise click.UsageError(f"Task {source} has no result ZIP URL.")
+            printer.update(click.style("downloading", fg=_state_color("running")))
+            result = cli.client.download_result(
+                task.full_zip_url, output_dir=output_dir
+            )
+            printer.complete(_phase_done_message("downloading"))
+            printer.complete(
+                click.style("saved to ", fg=LABEL) + _tilde(result.output_dir)
+            )
+            click.echo(str(result.output_dir))
+            return
         else:
             if is_ocr is not None:
                 raise click.UsageError(
