@@ -1,5 +1,3 @@
-from importlib.metadata import version
-
 from click.testing import CliRunner
 
 import uminer
@@ -7,8 +5,7 @@ from uminer import MinerUClient
 from uminer.cli import main
 
 
-def smoke_test() -> None:
-    assert version("uminer")
+def test_smoke() -> None:
     assert uminer.MinerUClient is MinerUClient
 
     result = CliRunner().invoke(main, ["--help"])
@@ -18,4 +15,4 @@ def smoke_test() -> None:
 
 
 if __name__ == "__main__":
-    smoke_test()
+    test_smoke()

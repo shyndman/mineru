@@ -20,6 +20,7 @@ dependencies = [
     "click>=8.4.0",
     "httpx>=0.28.1",
     "pydantic>=2.13.4",
+    "yaspin>=3.4.0",
 ]
 
 [project.urls]
@@ -54,6 +55,9 @@ reportMissingTypeStubs = false
 
 [tool.ruff]
 target-version = "py313"
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff.lint]
 select = [

@@ -1,20 +1,94 @@
 import json
 import os
-from collections.abc import Iterable, Sequence
+import re
+import shutil
+import sys
+import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import final
 from urllib.parse import urlparse
 
 import click
+from yaspin import yaspin as create_spinner
+from yaspin.core import Yaspin
+from yaspin.spinners import Spinners  # pyright: ignore[reportAny]
 
 from .api import MinerUClient
-from .errors import MinerUError
-from .job import ExtractionJob
-from .models import TaskPage
+from .errors import MinerUError, MinerUTaskFailedError
+from .job import ExtractionBatch, ExtractionBatchItemResult, ExtractionJob
+from .models import ExtractionSource, ExtractionStatus, TaskPage
 from .types import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL
 
 DEFAULT_ENV_FILE: Path = Path.home() / ".config" / "uminer" / "uminer.env"
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+type RgbColor = tuple[int, int, int]
+type CliColor = str | RgbColor
+
+_HOME_PREFIX: str = str(Path.home())
+
+HEADER_BACKGROUND: RgbColor = (38, 34, 59)
+HEADER_FOREGROUND: RgbColor = (255, 255, 255)
+STATE_DISPLAY: dict[str, str] = {"failed": "fail"}
+STATE: RgbColor = (95, 130, 220)
+STATE_FAILED: RgbColor = (186, 68, 68)
+LIST_STATE_DONE: RgbColor = (86, 120, 224)
+STATE_COLORS: dict[str, RgbColor] = {
+    "waiting-file": STATE,
+    "uploading": STATE,
+    "pending": STATE,
+    "running": STATE,
+    "converting": STATE,
+    "failed": STATE_FAILED,
+    "done": LIST_STATE_DONE,
+}
+LABEL: RgbColor = (140, 140, 140)
+PUNCT: RgbColor = (120, 120, 120)
+REF: RgbColor = (108, 160, 172)
+SPINNER_FRAME_WIDTH: int = 2
+TRUNCATION_MARKER: str = "…"
+
+
+@final
+class _StatusPrinter:
+    _spinner: Yaspin | None
+    _use_spinner: bool
+
+    def __init__(self) -> None:
+        self._use_spinner = sys.stderr.isatty()
+        self._spinner = None
+
+    def update(self, message: str) -> None:
+        if self._use_spinner:
+            if self._spinner is None:
+                self._spinner = create_spinner(
+                    Spinners.dots,  # pyright: ignore[reportAny]
+                    stream=sys.stderr,
+                )
+                self._spinner.start()
+                vars(self._spinner)["_terminal_width"] = 10_000
+            self._spinner.text = message
+        else:
+            click.echo(message, err=True)
+
+    def transient_width(self) -> int | None:
+        if not self._use_spinner:
+            return None
+        return shutil.get_terminal_size(fallback=(80, 24)).columns - SPINNER_FRAME_WIDTH
+
+    def complete(self, message: str) -> None:
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+        click.echo(message, err=True)
+
+    def finish(self) -> None:
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -57,8 +131,18 @@ def _resolve_api_key(*, explicit: str | None, env_file: Path) -> str:
     raise click.UsageError(message)
 
 
+_UUID4_RE: re.Pattern[str] = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
 def _is_url(source: str) -> bool:
     return urlparse(source).scheme in {"http", "https"}
+
+
+def _is_uuid4(source: str) -> bool:
+    return _UUID4_RE.match(source) is not None
 
 
 def _format_created_at(value: datetime) -> str:
@@ -72,14 +156,648 @@ def _get_ctx(ctx: click.Context) -> CLIContext:
     return obj
 
 
+def _state_color(state: str | None) -> RgbColor | None:
+    if state is None:
+        return None
+    return STATE_COLORS.get(state)
+
+
+def _tilde(path: Path | str) -> str:
+    s = str(path)
+    if s.startswith(_HOME_PREFIX):
+        return "~" + s[len(_HOME_PREFIX) :]
+    return s
+
+
+def _styled_status_reference(status: ExtractionStatus) -> str:
+    if status.task_id is not None:
+        return click.style("task ", fg=LABEL) + click.style(str(status.task_id), fg=REF)
+    if status.batch_id is not None:
+        return click.style("batch ", fg=LABEL) + click.style(status.batch_id, fg=REF)
+    return click.style("job", fg=LABEL)
+
+
+def _styled_job_reference(job: ExtractionJob) -> str:
+    return _styled_status_reference(job.last_status)
+
+
+def _source_text(source: ExtractionSource) -> str:
+    if source.kind == "url":
+        if source.url is None:
+            raise RuntimeError("URL extraction job missing source URL")
+        return source.url
+    if source.path is not None:
+        return _tilde(source.path)
+    return "file"
+
+
+def _source_label(job: ExtractionJob) -> str:
+    return _source_text(job.source)
+
+
+def _progress_message(status: ExtractionStatus) -> str:
+    state = status.state or "submitted"
+    progress = status.extract_progress
+    if progress is None:
+        return state
+    if progress.extracted_pages is None or progress.total_pages is None:
+        return state
+    return f"{state} {progress.extracted_pages}/{progress.total_pages} pages"
+
+
+def _phase_done_message(label: str, label_color: CliColor | None = STATE) -> str:
+    return (
+        click.style(f"{label} ", fg=label_color)
+        + click.style("· ", fg=PUNCT)
+        + click.style("done", fg=_state_color("done"))
+    )
+
+
+def _shorten_middle(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= len(TRUNCATION_MARKER):
+        return TRUNCATION_MARKER[:max_chars]
+    keep = max_chars - len(TRUNCATION_MARKER)
+    keep_start = keep // 2
+    keep_end = keep - keep_start
+    return value[:keep_start] + TRUNCATION_MARKER + value[-keep_end:]
+
+
+def _upload_progress_message(
+    path: Path, percentage: int, max_width: int | None = None
+) -> str:
+    prefix = "uploading "
+    separator = " · "
+    suffix = f"{percentage}%"
+    path_text = _tilde(path)
+    if max_width is not None:
+        max_path_chars = max_width - len(prefix) - len(separator) - len(suffix)
+        path_text = _shorten_middle(path_text, max(1, max_path_chars))
+    return (
+        click.style(prefix, fg=LABEL)
+        + path_text
+        + click.style(separator, fg=PUNCT)
+        + suffix[:-1]
+        + click.style(suffix[-1], fg=PUNCT)
+    )
+
+
+def _upload_done_message(path: Path) -> str:
+    return _phase_done_message(f"uploading {_tilde(path)}", LABEL)
+
+
+def _extract_done_message(total_pages: int) -> str:
+    page_label = "page" if total_pages == 1 else "pages"
+    return _phase_done_message(f"extracting {total_pages} {page_label}")
+
+
+def _format_task_failure(exc: MinerUTaskFailedError) -> str:
+    if exc.task_id is not None:
+        return f"task {exc.task_id} failed: {exc.message}"
+    if exc.batch_id is not None:
+        return f"batch {exc.batch_id} failed: {exc.message}"
+    return exc.message
+
+
+def _ordinal_prefix(index: int) -> str:
+    return click.style(f"{index + 1}. ", fg=LABEL)
+
+
+def _prefixed_message(index: int, message: str) -> str:
+    return _ordinal_prefix(index) + message
+
+
+def _source_kind(source: str) -> str:
+    if _is_url(source):
+        return "url"
+    if _is_uuid4(source) and not Path(source).exists():
+        return "task"
+    return "file"
+
+
+def _classify_sources(sources: Sequence[str]) -> str:
+    kinds = {_source_kind(source) for source in sources}
+    if len(kinds) != 1:
+        raise click.UsageError(
+            "All sources must be URLs, file paths, or task IDs of the same kind."
+        )
+    return next(iter(kinds))
+
+
+def _count_message(label: str, value: str, color: CliColor | None) -> str:
+    return click.style(f"{label} {value}", fg=color)
+
+
+def _batch_spinner_message(
+    *,
+    statuses: Sequence[ExtractionStatus],
+    upload_progress: tuple[int, int] | None,
+    downloading_count: int,
+    done_count: int,
+    failed_count: int,
+) -> str:
+    parts: list[str] = []
+    if upload_progress is not None:
+        uploaded, total = upload_progress
+        if uploaded < total:
+            parts.append(_count_message("uploading", f"{uploaded}/{total}", STATE))
+
+    state_counts: dict[str, int] = {}
+    for status in statuses:
+        state = status.state
+        if state is None or state in {"done", "failed"}:
+            continue
+        label = "waiting" if state == "waiting-file" else state
+        state_counts[label] = state_counts.get(label, 0) + 1
+
+    for state in ("waiting", "pending", "running", "converting"):
+        count = state_counts.get(state)
+        if count:
+            color = _state_color("waiting-file" if state == "waiting" else state)
+            parts.append(_count_message(state, str(count), color))
+    if downloading_count:
+        parts.append(_count_message("downloading", str(downloading_count), STATE))
+    parts.append(_count_message("done", str(done_count), _state_color("done")))
+    parts.append(_count_message("failed", str(failed_count), _state_color("failed")))
+    return click.style(" · ", fg=PUNCT).join(parts)
+
+
+def _task_spinner_message(
+    *,
+    total: int,
+    checked_count: int,
+    downloading_count: int,
+    done_count: int,
+    failed_count: int,
+) -> str:
+    parts = [
+        _count_message("checking", f"{checked_count}/{total}", STATE),
+    ]
+    if downloading_count:
+        parts.append(_count_message("downloading", str(downloading_count), STATE))
+    parts.append(_count_message("done", str(done_count), _state_color("done")))
+    parts.append(_count_message("failed", str(failed_count), _state_color("failed")))
+    return click.style(" · ", fg=PUNCT).join(parts)
+
+
+def _format_item_error(error: Exception) -> str:
+    message = error.message if isinstance(error, MinerUTaskFailedError) else str(error)
+    return message or error.__class__.__name__
+
+
+def _task_output_dir(
+    output_dir: Path | None, total: int, index: int, task_id: str
+) -> Path | None:
+    if output_dir is None:
+        return None
+    if total == 1:
+        return output_dir
+    return output_dir / f"{index + 1:03d}-{task_id}"
+
+
+def _wait_for_result(
+    job: ExtractionJob,
+    *,
+    output_dir: Path | None,
+    printer: _StatusPrinter,
+) -> Path:
+    seen_message: str | None = None
+    last_state: str | None = None
+    last_total_pages: int | None = None
+
+    def on_update(status: ExtractionStatus) -> None:
+        nonlocal last_state, last_total_pages, seen_message
+        state = status.state
+        progress = status.extract_progress
+        if progress is not None and progress.total_pages is not None:
+            last_total_pages = progress.total_pages
+        if (
+            last_state == "running"
+            and state in {"converting", "done"}
+            and last_total_pages is not None
+        ):
+            printer.complete(_extract_done_message(last_total_pages))
+            last_total_pages = None
+        if last_state == "converting" and state == "done":
+            printer.complete(_phase_done_message("converting"))
+        message = _progress_message(status)
+        if state == "done":
+            last_state = state
+            return
+        if message == seen_message:
+            last_state = state
+            return
+        printer.update(click.style(message, fg=_state_color(state)))
+        seen_message = message
+        last_state = state
+
+    def on_download_start() -> None:
+        zip_url = job.last_status.full_zip_url
+        if zip_url is None:
+            raise RuntimeError("Extraction job missing result ZIP URL")
+        printer.complete(
+            click.style("zip URL", fg=LABEL) + click.style(": ", fg=PUNCT) + zip_url
+        )
+        printer.update(click.style("downloading", fg=_state_color("running")))
+
+    result = job.wait(
+        output_dir=output_dir,
+        on_update=on_update,
+        on_download_start=on_download_start,
+    )
+    printer.complete(_phase_done_message("downloading"))
+    printer.complete(click.style("saved to ", fg=LABEL) + _tilde(result.output_dir))
+    return result.output_dir
+
+
+def _wait_for_batch_results(
+    batch: ExtractionBatch,
+    *,
+    output_dir: Path | None,
+    printer: _StatusPrinter,
+    upload_progress: tuple[int, int] | None,
+) -> tuple[ExtractionBatchItemResult, ...]:
+    statuses = batch.last_statuses
+    announced_indices: set[int] = set()
+    downloading_indices: set[int] = set()
+    done_count = 0
+    failed_count = 0
+
+    def refresh_spinner() -> None:
+        printer.update(
+            _batch_spinner_message(
+                statuses=statuses,
+                upload_progress=upload_progress,
+                downloading_count=len(downloading_indices),
+                done_count=done_count,
+                failed_count=failed_count,
+            )
+        )
+
+    for index, result in enumerate(batch.item_results):
+        if result is None:
+            printer.complete(
+                _prefixed_message(
+                    index,
+                    click.style("submitted ", fg=LABEL)
+                    + _styled_status_reference(batch.last_statuses[index])
+                    + click.style(" · ", fg=PUNCT)
+                    + _source_text(batch.sources[index]),
+                )
+            )
+            continue
+        announced_indices.add(index)
+        failed_count += 1
+        if result.error is None:
+            raise RuntimeError("Completed batch item is missing an error")
+        printer.complete(
+            _prefixed_message(
+                index,
+                click.style("failed ", fg=_state_color("failed"))
+                + click.style("· ", fg=PUNCT)
+                + _format_item_error(result.error),
+            )
+        )
+    refresh_spinner()
+
+    def on_update(updated_statuses: tuple[ExtractionStatus, ...]) -> None:
+        nonlocal statuses
+        statuses = updated_statuses
+        refresh_spinner()
+
+    def on_download_start(index: int, _status: ExtractionStatus) -> None:
+        downloading_indices.add(index)
+        refresh_spinner()
+
+    def on_item_result(index: int, result: ExtractionBatchItemResult) -> None:
+        nonlocal done_count, failed_count
+        if index in announced_indices:
+            return
+        announced_indices.add(index)
+        downloading_indices.discard(index)
+        if result.error is None:
+            done_count += 1
+            if result.output_dir is None:
+                raise RuntimeError(
+                    "Successful batch item is missing an output directory"
+                )
+            printer.complete(
+                _prefixed_message(
+                    index,
+                    click.style("saved to ", fg=LABEL) + _tilde(result.output_dir),
+                )
+            )
+        else:
+            failed_count += 1
+            printer.complete(
+                _prefixed_message(
+                    index,
+                    click.style("failed ", fg=_state_color("failed"))
+                    + click.style("· ", fg=PUNCT)
+                    + _format_item_error(result.error),
+                )
+            )
+        refresh_spinner()
+
+    results = batch.wait(
+        output_dir=output_dir,
+        on_update=on_update,
+        on_download_start=on_download_start,
+        on_item_result=on_item_result,
+    )
+    printer.finish()
+    return results
+
+
+def _download_task_results(
+    cli: CLIContext,
+    sources: Sequence[str],
+    *,
+    output_dir: Path | None,
+    printer: _StatusPrinter,
+) -> tuple[tuple[Path, ...], bool]:
+    checked_count = 0
+    downloading_count = 0
+    done_count = 0
+    failed_count = 0
+    saved_paths: list[Path] = []
+
+    def refresh_spinner() -> None:
+        printer.update(
+            _task_spinner_message(
+                total=len(sources),
+                checked_count=checked_count,
+                downloading_count=downloading_count,
+                done_count=done_count,
+                failed_count=failed_count,
+            )
+        )
+
+    refresh_spinner()
+    for index, source in enumerate(sources):
+        try:
+            task = cli.client.get_extract_task(source)
+            checked_count += 1
+            refresh_spinner()
+            if task.state != "done":
+                failed_count += 1
+                printer.complete(
+                    _prefixed_message(
+                        index,
+                        click.style("failed ", fg=_state_color("failed"))
+                        + click.style("· ", fg=PUNCT)
+                        + f"task {source} is not done (state: {task.state})",
+                    )
+                )
+                refresh_spinner()
+                continue
+            if task.full_zip_url is None:
+                failed_count += 1
+                printer.complete(
+                    _prefixed_message(
+                        index,
+                        click.style("failed ", fg=_state_color("failed"))
+                        + click.style("· ", fg=PUNCT)
+                        + f"task {source} has no result ZIP URL",
+                    )
+                )
+                refresh_spinner()
+                continue
+            downloading_count += 1
+            refresh_spinner()
+            result = cli.client.download_result(
+                task.full_zip_url,
+                output_dir=_task_output_dir(output_dir, len(sources), index, source),
+            )
+        except Exception as exc:
+            downloading_count = max(0, downloading_count - 1)
+            failed_count += 1
+            printer.complete(
+                _prefixed_message(
+                    index,
+                    click.style("failed ", fg=_state_color("failed"))
+                    + click.style("· ", fg=PUNCT)
+                    + _format_item_error(exc),
+                )
+            )
+            refresh_spinner()
+            continue
+
+        downloading_count -= 1
+        done_count += 1
+        saved_paths.append(result.output_dir)
+        printer.complete(
+            _prefixed_message(
+                index,
+                click.style("saved to ", fg=LABEL) + _tilde(result.output_dir),
+            )
+        )
+        refresh_spinner()
+
+    printer.finish()
+    return tuple(saved_paths), failed_count > 0
+
+
+def _extract_single_source(
+    cli: CLIContext,
+    source: str,
+    *,
+    output_dir: Path | None,
+    printer: _StatusPrinter,
+    is_ocr: bool | None,
+    enable_formula: bool | None,
+    enable_table: bool | None,
+    language: str | None,
+    page_ranges: str | None,
+    poll_interval: float,
+) -> Path:
+    source_kind = _source_kind(source)
+    if source_kind == "url":
+        job: ExtractionJob = cli.client.extract_url(
+            source,
+            is_ocr=is_ocr,
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+            language=language,
+            page_ranges=page_ranges,
+            poll_interval_seconds=poll_interval,
+        )
+    elif source_kind == "task":
+        task = cli.client.get_extract_task(source)
+        if task.state != "done":
+            raise click.UsageError(f"Task {source} is not done (state: {task.state})")
+        if task.full_zip_url is None:
+            raise click.UsageError(f"Task {source} has no result ZIP URL.")
+        printer.update(click.style("downloading", fg=_state_color("running")))
+        result = cli.client.download_result(task.full_zip_url, output_dir=output_dir)
+        printer.complete(_phase_done_message("downloading"))
+        printer.complete(click.style("saved to ", fg=LABEL) + _tilde(result.output_dir))
+        return result.output_dir
+    else:
+        if is_ocr is not None:
+            raise click.UsageError(
+                "--ocr/--no-ocr is only supported for URL extraction."
+            )
+        if page_ranges is not None:
+            raise click.UsageError(
+                "--page-ranges is only supported for URL extraction."
+            )
+        file_path = Path(source).expanduser()
+        if not file_path.exists():
+            raise click.UsageError(f"File not found: {file_path}")
+        seen_upload_percentage: int | None = None
+
+        def on_upload_progress(
+            path: Path, uploaded_bytes: int, total_bytes: int
+        ) -> None:
+            nonlocal seen_upload_percentage
+            percentage = (
+                100 if total_bytes == 0 else uploaded_bytes * 100 // total_bytes
+            )
+            if percentage == seen_upload_percentage:
+                return
+            if percentage == 100:
+                printer.complete(_upload_done_message(path))
+                seen_upload_percentage = percentage
+                return
+            printer.update(
+                _upload_progress_message(path, percentage, printer.transient_width())
+            )
+            seen_upload_percentage = percentage
+
+        printer.update(
+            _upload_progress_message(file_path, 0, printer.transient_width())
+        )
+        job = cli.client.extract_file(
+            file_path,
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+            language=language,
+            on_upload_progress=on_upload_progress,
+            poll_interval_seconds=poll_interval,
+        )
+    printer.update(
+        click.style("submitted ", fg=LABEL)
+        + _styled_job_reference(job)
+        + click.style(" · ", fg=PUNCT)
+        + _source_label(job)
+    )
+    return _wait_for_result(job, output_dir=output_dir, printer=printer)
+
+
+def _extract_url_sources(
+    cli: CLIContext,
+    sources: Sequence[str],
+    *,
+    output_dir: Path | None,
+    printer: _StatusPrinter,
+    is_ocr: bool | None,
+    enable_formula: bool | None,
+    enable_table: bool | None,
+    language: str | None,
+    page_ranges: str | None,
+    poll_interval: float,
+) -> tuple[ExtractionBatchItemResult, ...]:
+    if is_ocr is not None:
+        raise click.UsageError(
+            "--ocr/--no-ocr is only supported for single URL extraction."
+        )
+    if page_ranges is not None:
+        raise click.UsageError(
+            "--page-ranges is only supported for single URL extraction."
+        )
+    batch = cli.client.extract_urls(
+        sources,
+        enable_formula=enable_formula,
+        enable_table=enable_table,
+        language=language,
+        poll_interval_seconds=poll_interval,
+    )
+    return _wait_for_batch_results(
+        batch,
+        output_dir=output_dir,
+        printer=printer,
+        upload_progress=None,
+    )
+
+
+def _extract_file_sources(
+    cli: CLIContext,
+    sources: Sequence[str],
+    *,
+    output_dir: Path | None,
+    printer: _StatusPrinter,
+    is_ocr: bool | None,
+    enable_formula: bool | None,
+    enable_table: bool | None,
+    language: str | None,
+    page_ranges: str | None,
+    poll_interval: float,
+) -> tuple[ExtractionBatchItemResult, ...]:
+    if is_ocr is not None:
+        raise click.UsageError("--ocr/--no-ocr is only supported for URL extraction.")
+    if page_ranges is not None:
+        raise click.UsageError("--page-ranges is only supported for URL extraction.")
+    file_paths = tuple(Path(item).expanduser() for item in sources)
+    for file_path in file_paths:
+        if not file_path.exists():
+            raise click.UsageError(f"File not found: {file_path}")
+    uploaded_indices: set[int] = set()
+    upload_lock = threading.Lock()
+
+    def on_batch_upload_progress(
+        index: int, _path: Path, uploaded_bytes: int, total_bytes: int
+    ) -> None:
+        if uploaded_bytes != total_bytes:
+            return
+        with upload_lock:
+            if index in uploaded_indices:
+                return
+            uploaded_indices.add(index)
+            printer.update(
+                _batch_spinner_message(
+                    statuses=(),
+                    upload_progress=(len(uploaded_indices), len(file_paths)),
+                    downloading_count=0,
+                    done_count=0,
+                    failed_count=0,
+                )
+            )
+
+    printer.update(
+        _batch_spinner_message(
+            statuses=(),
+            upload_progress=(0, len(file_paths)),
+            downloading_count=0,
+            done_count=0,
+            failed_count=0,
+        )
+    )
+    batch = cli.client.extract_files(
+        file_paths,
+        enable_formula=enable_formula,
+        enable_table=enable_table,
+        language=language,
+        on_upload_progress=on_batch_upload_progress,
+        poll_interval_seconds=poll_interval,
+    )
+    return _wait_for_batch_results(
+        batch,
+        output_dir=output_dir,
+        printer=printer,
+        upload_progress=None,
+    )
+
+
 def render_task_table(page: TaskPage) -> str:
-    headers: tuple[str, str, str, str] = ("TASK_ID", "STATE", "CREATED", "FILE_NAME")
+    headers: tuple[str, str, str, str] = ("FILENAME", "STATE", "CREATED", "TASK_ID")
     rows: list[tuple[str, str, str, str]] = [
         (
-            task.task_id,
+            task.file_name,
             task.state,
             _format_created_at(task.created_at),
-            task.file_name,
+            str(task.task_id),
         )
         for task in page.tasks
     ]
@@ -93,12 +811,32 @@ def render_task_table(page: TaskPage) -> str:
     def fmt_row(cells: Sequence[str]) -> str:
         return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
 
-    lines: list[str] = [fmt_row(headers)]
-    lines.extend(fmt_row(row) for row in rows)
+    lines: list[str] = [
+        click.style(
+            fmt_row(headers),
+            fg=HEADER_FOREGROUND,
+            bg=HEADER_BACKGROUND,
+            bold=True,
+        )
+    ]
+    for row in rows:
+        state_text = STATE_DISPLAY.get(row[1], row[1]).ljust(widths[1])
+        state_color = _state_color(row[1])
+        styled_state = click.style(state_text, fg=state_color)
+        lines.append(
+            "  ".join(
+                (
+                    row[0].ljust(widths[0]),
+                    styled_state,
+                    row[2].ljust(widths[2]),
+                    row[3].ljust(widths[3]),
+                )
+            )
+        )
     return "\n".join(lines)
 
 
-@click.group(help="uminer command-line interface.")
+@click.group(help="uminer command-line interface.", context_settings=CONTEXT_SETTINGS)
 @click.option(
     "--env-file",
     type=click.Path(path_type=Path, dir_okay=False),
@@ -136,16 +874,21 @@ def main(
     _ = ctx.call_on_close(client.close)
 
 
-@main.command("extract", help="Extract a document from a URL or local file path.")
-@click.argument("source", type=str)
+@main.command(
+    "extract",
+    help="Extract document(s) from URLs, local file paths, or task IDs.",
+    context_settings=CONTEXT_SETTINGS,
+)
+@click.argument("source", type=str, nargs=-1, required=True)
 @click.option(
     "-o",
     "--output-dir",
     type=click.Path(path_type=Path, file_okay=False),
     default=None,
     help=(
-        "Directory to download the result into. Defaults to the per-job cache "
-        "under ~/.cache/uminer/results/."
+        "Directory to download the result into. Without this option, local file "
+        "inputs write extracted contents to SOURCE.uminer/ beside the source and "
+        "keep result.zip in the per-job cache under ~/.cache/uminer/results/."
     ),
 )
 @click.option(
@@ -188,7 +931,7 @@ def main(
 @click.pass_context
 def extract_cmd(
     ctx: click.Context,
-    source: str,
+    source: tuple[str, ...],
     output_dir: Path | None,
     is_ocr: bool | None,
     enable_formula: bool | None,
@@ -198,45 +941,94 @@ def extract_cmd(
     poll_interval: float,
 ) -> None:
     cli = _get_ctx(ctx)
-    extra_formats: Iterable[str] | None = None
-    _ = extra_formats  # reserved for a later flag
+    sources = tuple(source)
+    printer = _StatusPrinter()
+
     try:
-        if _is_url(source):
-            job: ExtractionJob = cli.client.extract_url(
-                source,
+        source_kind = _classify_sources(sources)
+        if len(sources) == 1:
+            click.echo(
+                str(
+                    _extract_single_source(
+                        cli,
+                        sources[0],
+                        output_dir=output_dir,
+                        printer=printer,
+                        is_ocr=is_ocr,
+                        enable_formula=enable_formula,
+                        enable_table=enable_table,
+                        language=language,
+                        page_ranges=page_ranges,
+                        poll_interval=poll_interval,
+                    )
+                )
+            )
+            return
+
+        if source_kind == "url":
+            results = _extract_url_sources(
+                cli,
+                sources,
+                output_dir=output_dir,
+                printer=printer,
                 is_ocr=is_ocr,
                 enable_formula=enable_formula,
                 enable_table=enable_table,
                 language=language,
                 page_ranges=page_ranges,
-                poll_interval_seconds=poll_interval,
+                poll_interval=poll_interval,
             )
-        else:
-            if is_ocr is not None:
-                raise click.UsageError(
-                    "--ocr/--no-ocr is only supported for URL extraction."
-                )
-            if page_ranges is not None:
-                raise click.UsageError(
-                    "--page-ranges is only supported for URL extraction."
-                )
-            file_path = Path(source).expanduser()
-            if not file_path.exists():
-                raise click.UsageError(f"File not found: {file_path}")
-            job = cli.client.extract_file(
-                file_path,
-                enable_formula=enable_formula,
-                enable_table=enable_table,
-                language=language,
-                poll_interval_seconds=poll_interval,
+            for result in results:
+                if result.output_dir is not None:
+                    click.echo(str(result.output_dir))
+            if any(result.error is not None for result in results):
+                raise click.exceptions.Exit(1)
+            return
+
+        if source_kind == "task":
+            saved_paths, has_failures = _download_task_results(
+                cli,
+                sources,
+                output_dir=output_dir,
+                printer=printer,
             )
-        result = job.wait(output_dir=output_dir)
+            for saved_path in saved_paths:
+                click.echo(str(saved_path))
+            if has_failures:
+                raise click.exceptions.Exit(1)
+            return
+
+        results = _extract_file_sources(
+            cli,
+            sources,
+            output_dir=output_dir,
+            printer=printer,
+            is_ocr=is_ocr,
+            enable_formula=enable_formula,
+            enable_table=enable_table,
+            language=language,
+            page_ranges=page_ranges,
+            poll_interval=poll_interval,
+        )
+        for result in results:
+            if result.output_dir is not None:
+                click.echo(str(result.output_dir))
+        if any(result.error is not None for result in results):
+            raise click.exceptions.Exit(1)
+        return
+    except MinerUTaskFailedError as exc:
+        printer.finish()
+        raise click.ClickException(_format_task_failure(exc)) from exc
     except MinerUError as exc:
+        printer.finish()
         raise click.ClickException(str(exc)) from exc
-    click.echo(str(result.output_dir))
 
 
-@main.command("list", help="List recent extraction tasks.")
+@main.command(
+    "list",
+    help="List recent extraction tasks.",
+    context_settings=CONTEXT_SETTINGS,
+)
 @click.option(
     "--page",
     "page_no",
@@ -275,7 +1067,11 @@ def list_cmd(
         click.echo(json.dumps(page.model_dump(mode="json"), indent=2))
         return
     click.echo(render_task_table(page))
-    click.echo(f"page {page_no} · showing {len(page.tasks)} of {page.total}")
+    click.echo(
+        click.style(
+            f"page {page_no} · showing {len(page.tasks)} of {page.total}", dim=True
+        )
+    )
 
 
 if __name__ == "__main__":
