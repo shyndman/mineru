@@ -886,8 +886,9 @@ def main(
     type=click.Path(path_type=Path, file_okay=False),
     default=None,
     help=(
-        "Directory to download the result into. Defaults to the per-job cache "
-        "under ~/.cache/uminer/results/."
+        "Directory to download the result into. Without this option, local file "
+        "inputs write extracted contents to SOURCE.uminer/ beside the source and "
+        "keep result.zip in the per-job cache under ~/.cache/uminer/results/."
     ),
 )
 @click.option(

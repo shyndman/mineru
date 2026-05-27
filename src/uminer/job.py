@@ -13,7 +13,7 @@ import httpx
 
 from .errors import MinerUResultError, MinerUTaskFailedError
 from .models import BatchExtractResult, ExtractionSource, ExtractionStatus, ExtractTask
-from .results import MinerUParsedResult
+from .results import MinerUParsedResult, default_local_output_dir
 
 type StatusCallback = Callable[[ExtractionStatus], None]
 type DownloadStartCallback = Callable[[], None]
@@ -29,7 +29,11 @@ class MinerUClientProtocol(Protocol):
     def get_extract_task(self, task_id: str | UUID) -> ExtractTask: ...
     def get_batch_extract_result(self, batch_id: str) -> BatchExtractResult: ...
     def download_result(
-        self, full_zip_url: str, *, output_dir: Path | None = None
+        self,
+        full_zip_url: str,
+        *,
+        output_dir: Path | None = None,
+        extract_dir: Path | None = None,
     ) -> MinerUParsedResult: ...
 
 
@@ -165,8 +169,13 @@ class ExtractionJob:
                     raise MinerUResultError("Extraction completed without full_zip_url")
                 if on_download_start is not None:
                     on_download_start()
+                extract_dir = (
+                    None if output_dir is not None else _source_output_dir(self.source)
+                )
                 return self._client.download_result(
-                    status.full_zip_url, output_dir=output_dir
+                    status.full_zip_url,
+                    output_dir=output_dir,
+                    extract_dir=extract_dir,
                 )
             if status.state == "failed":
                 raise MinerUTaskFailedError(
@@ -359,16 +368,23 @@ class ExtractionBatch:
                             self.sources[index],
                             status,
                         )
+                        item_extract_dir = (
+                            None
+                            if item_output_dir is not None
+                            else _source_output_dir(self.sources[index])
+                        )
+                        item_result_dir = item_output_dir or item_extract_dir
                         try:
                             parsed = self._client.download_result(
                                 status.full_zip_url,
                                 output_dir=item_output_dir,
+                                extract_dir=item_extract_dir,
                             )
                         except Exception as exc:
                             result = ExtractionBatchItemResult(
                                 source=self.sources[index],
                                 status=status,
-                                output_dir=item_output_dir,
+                                output_dir=item_result_dir,
                                 error=exc,
                             )
                         else:
@@ -420,6 +436,12 @@ def _source_label(source: ExtractionSource) -> str | None:
         return None
     path = urlparse(source.url).path.rsplit("/", maxsplit=1)[-1]
     return path or None
+
+
+def _source_output_dir(source: ExtractionSource) -> Path | None:
+    if source.path is None:
+        return None
+    return default_local_output_dir(source.path)
 
 
 def _sanitize_label(label: str) -> str:

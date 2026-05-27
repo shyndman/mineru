@@ -540,17 +540,26 @@ class MinerUClient:
         return BatchExtractResult.model_validate(data)
 
     def download_result(
-        self, full_zip_url: str, *, output_dir: Path | None = None
+        self,
+        full_zip_url: str,
+        *,
+        output_dir: Path | None = None,
+        extract_dir: Path | None = None,
     ) -> MinerUParsedResult:
-        result_dir = output_dir or default_result_cache_dir(_result_id(full_zip_url))
-        result_dir.mkdir(parents=True, exist_ok=True)
-        zip_path = result_dir / "result.zip"
+        zip_dir = output_dir or default_result_cache_dir(_result_id(full_zip_url))
+        zip_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = zip_dir / "result.zip"
         with self._client.stream("GET", full_zip_url) as response:
             _ = response.raise_for_status()
             with zip_path.open("wb") as file:
                 for chunk in response.iter_bytes():
                     _ = file.write(chunk)
-        return MinerUParsedResult.from_zip_file(zip_path, result_dir)
+        result_output_dir = extract_dir or output_dir or zip_dir
+        return MinerUParsedResult.from_zip_file(
+            zip_path,
+            result_output_dir,
+            extract_dir=extract_dir,
+        )
 
     def _request(
         self,

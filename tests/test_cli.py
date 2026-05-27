@@ -259,9 +259,13 @@ class FakeMinerUClient:
         return self.get_extract_task_result
 
     def download_result(
-        self, full_zip_url: str, *, output_dir: object = None
+        self,
+        full_zip_url: str,
+        *,
+        output_dir: object = None,
+        extract_dir: object = None,
     ) -> object:
-        del output_dir
+        del output_dir, extract_dir
         if (
             self.download_result_values is not None
             and full_zip_url in self.download_result_values
@@ -287,6 +291,7 @@ def test_short_help_aliases_show_help(monkeypatch: MonkeyPatch) -> None:
     assert list_help.exit_code == 0, list_help.output
     assert "extract" in main_help.output
     assert "--poll-interval" in extract_help.output
+    assert "SOURCE.uminer/" in extract_help.output
     assert "--page-size" in list_help.output
 
 
@@ -411,7 +416,7 @@ def test_extract_file_reports_upload_progress_before_submission(
     monkeypatch.setattr("uminer.cli.MinerUClient", FakeMinerUClient)
     source_path = tmp_path / "demo.pdf"
     _ = source_path.write_bytes(b"1234")
-    output_dir = tmp_path / "result"
+    output_dir = tmp_path / "demo.pdf.uminer"
     FakeMinerUClient.job = FakeJob(
         source=ExtractionSource(
             kind="file", path=source_path, file={"name": source_path.name}

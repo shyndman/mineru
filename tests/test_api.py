@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 import zipfile
@@ -434,6 +435,120 @@ def test_extract_file_job_reports_batch_status(tmp_path: Path) -> None:
     assert job().state == "done"
     assert job.last_status.state == "done"
     assert job.wait().markdown == "# Smoke\n"
+
+
+def test_extract_file_job_writes_default_output_beside_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    zip_url = "https://cdn.example/result.zip"
+    zip_bytes = _result_zip_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "file_urls": ["https://uploads.example/demo.pdf"],
+                }
+            )
+        if request.method == "PUT":
+            return httpx.Response(200)
+        if str(request.url).endswith("/api/v4/extract-results/batch/batch-1"):
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "extract_result": [
+                        {
+                            "file_name": "demo.pdf",
+                            "state": "done",
+                            "full_zip_url": zip_url,
+                            "err_msg": "",
+                        }
+                    ],
+                }
+            )
+        assert str(request.url) == zip_url
+        return httpx.Response(200, content=zip_bytes)
+
+    path = tmp_path / "demo.pdf"
+    _ = path.write_bytes(b"pdf bytes")
+    client = MinerUClient(api_key="token", client=_mock_client(handler))
+
+    result = client.extract_file(path, poll_interval_seconds=0).wait()
+
+    result_id = hashlib.sha256(zip_url.encode("utf-8")).hexdigest()[:24]
+    assert result.output_dir == tmp_path / "demo.pdf.uminer"
+    assert result.zip_path == (
+        tmp_path / "cache" / "uminer" / "results" / result_id / "result.zip"
+    )
+    assert (result.output_dir / "full.md").read_text(encoding="utf-8") == "# Smoke\n"
+
+
+def test_extract_files_write_default_outputs_beside_each_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    zip_bytes = _result_zip_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "file_urls": [
+                        "https://uploads.example/one.pdf",
+                        "https://uploads.example/two.pdf",
+                    ],
+                }
+            )
+        if request.method == "PUT":
+            return httpx.Response(200)
+        if str(request.url).endswith("/api/v4/extract-results/batch/batch-1"):
+            return _json_response(
+                {
+                    "batch_id": "batch-1",
+                    "extract_result": [
+                        {
+                            "file_name": "one.pdf",
+                            "data_id": "uminer-1",
+                            "state": "done",
+                            "full_zip_url": "https://cdn.example/one.zip",
+                            "err_msg": "",
+                        },
+                        {
+                            "file_name": "two.pdf",
+                            "data_id": "uminer-2",
+                            "state": "done",
+                            "full_zip_url": "https://cdn.example/two.zip",
+                            "err_msg": "",
+                        },
+                    ],
+                }
+            )
+        assert str(request.url) in {
+            "https://cdn.example/one.zip",
+            "https://cdn.example/two.zip",
+        }
+        return httpx.Response(200, content=zip_bytes)
+
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    _ = first.write_bytes(b"one")
+    _ = second.write_bytes(b"two")
+    client = MinerUClient(api_key="token", client=_mock_client(handler))
+
+    results = client.extract_files([first, second], poll_interval_seconds=0).wait()
+
+    assert [result.output_dir for result in results] == [
+        tmp_path / "one.pdf.uminer",
+        tmp_path / "two.pdf.uminer",
+    ]
+    assert all(result.result is not None for result in results)
+    assert all(
+        result.result is not None and result.result.zip_path.parent != result.output_dir
+        for result in results
+    )
 
 
 def test_extract_urls_waits_for_each_batch_item_and_collects_failures(

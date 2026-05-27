@@ -15,6 +15,8 @@ from .errors import MinerUResultError
 from .types import Json
 
 CACHE_DIR_ENV = "XDG_CACHE_HOME"
+EXTRACTED_DIR_NAME = "extracted"
+LOCAL_OUTPUT_DIR_SUFFIX = ".uminer"
 
 
 class MinerUResultFile(BaseModel):
@@ -56,8 +58,10 @@ class MinerUParsedResult(BaseModel):
         return _read_json_file(path)
 
     @classmethod
-    def from_zip_file(cls, zip_path: Path, output_dir: Path) -> MinerUParsedResult:
-        extracted_dir = output_dir / "extracted"
+    def from_zip_file(
+        cls, zip_path: Path, output_dir: Path, *, extract_dir: Path | None = None
+    ) -> MinerUParsedResult:
+        extracted_dir = extract_dir or output_dir / EXTRACTED_DIR_NAME
         if extracted_dir.exists():
             shutil.rmtree(extracted_dir)
         extracted_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +93,10 @@ def default_result_cache_dir(result_id: str) -> Path:
     cache_home = os.getenv(CACHE_DIR_ENV)
     root = Path(cache_home) if cache_home else Path.home() / ".cache"
     return root / "uminer" / "results" / result_id
+
+
+def default_local_output_dir(source_path: Path) -> Path:
+    return source_path.with_name(source_path.name + LOCAL_OUTPUT_DIR_SUFFIX)
 
 
 # Manual extraction (vs. ZipFile.extractall) to guard against zip-slip:
