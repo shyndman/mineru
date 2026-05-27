@@ -1,3 +1,27 @@
+## v0.2.0 (2026-05-27)
+
+### Feat
+
+- **cli**: write local extracts beside source
+- **cli**: support multi-source extract
+- **cli**: download completed tasks by id
+- **cli**: persist completed extract status steps
+- **cli**: improve extract command presentation
+- **api**: add upload progress tracking
+- **cli**: print result zip url during extract
+
+### Fix
+
+- **release**: restore released version metadata
+- **api**: type task ids as UUIDs
+- **job**: retry transient 403 batch-result polls
+- **cli**: display "fail" instead of "failed" in list table
+
+### Refactor
+
+- **tests**: migrate test_api from unittest to pytest
+- **tests**: migrate test_api from unittest to pytest
+
 ## v0.1.0 (2026-05-23)
 
 ### Feat
