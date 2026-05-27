@@ -1,3 +1,9 @@
+## v0.1.0 (2026-05-23)
+
+### Feat
+
+- **cli**: show extract progress and styled tasks
+
 ## v0.0.2 (2026-05-21)
 
 ### Fix
